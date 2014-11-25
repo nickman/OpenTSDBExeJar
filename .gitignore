@@ -1,12 +1,40 @@
+INSTALL
+Makefile
+Makefile.in
+aclocal.m4
+autom4te.cache
+build
+target
+config.log
+config.status
+configure
+pom.xml
+*.pyc
+.*.swp
+*.rrd
 *.class
+*/target/*
+*.orig
+*.log
 
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
+#for Intellij
+\.idea
+*.iml
 
-# Package Files #
-*.jar
-*.war
-*.ear
+#for guava rpm maker
+guava-rpm-maker/\.project
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
-hs_err_pid*
+# for mac finder
+.DS_Store
+
+# for eclipse
+.pydevproject
+.metadata
+.project
+.classpath
+.settings
+
+# maven
+src-main
+src-test
+plugin_test.jar
