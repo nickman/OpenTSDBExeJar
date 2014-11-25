@@ -220,6 +220,22 @@
   "help": "default"
  },
  {
+  "key": "tsd.core.auto_create_tagks",
+  "cl-option": "--auto-tagk",
+  "defaultValue": "true",
+  "description": "Automatically add tag keys to tsdb as they are inserted",
+  "help": "extended",
+  "meta": "BOOL"
+ },
+ {
+  "key": "tsd.core.auto_create_tagvs",
+  "cl-option": "--auto-tagv",
+  "defaultValue": "true",
+  "description": "Automatically add tag values to tsdb as they are inserted",
+  "help": "extended",
+  "meta": "BOOL"
+ },
+ {
   "key": "tsd.storage.enable_compaction",
   "cl-option": "--enable-compaction",
   "defaultValue": "true",
@@ -320,12 +336,51 @@
  {
   "key": "tsd.core.socket.timeout",
   "cl-option": "--socket-timeout",
-  "defaultValue": 10000,
+  "defaultValue": 0,
   "description": "The idle time timeout",
   "help": "extended",
   "meta": "POSINT"
- }
- 
+ },
+ {
+  "key": "tsd.mode",
+  "cl-option": "--tsd-mode",
+  "defaultValue": "rw",
+  "description": "The read write mode for this TSD: rw, ro, wo",
+  "help": "extended",
+  "meta": "RWMODE"
+ },
+ {
+  "key": "tsd.no_diediedie",
+  "cl-option": "--tsd-nodie",
+  "defaultValue": "false",
+  "description": "Optionally disables the diediedie remote API endpoint to shutdown the TSD",
+  "help": "extended",
+  "meta": "BOOL"
+ },
+ {
+  "key": "tsd.core.preload_uid_cache",
+  "cl-option": "--tsd-preloaduids",
+  "defaultValue": "false",
+  "description": "Optionally preloads the UID cache at startup time",
+  "help": "extended",
+  "meta": "BOOL"
+ },
+ {
+  "key": "tsd.core.preload_uid_cache.max_entries",
+  "cl-option": "--tsd-maxuids",
+  "defaultValue": 300000,
+  "description": "The maximum number of UIDs to cache",
+  "help": "extended",
+  "meta": "POSINT"
+ },
+ {
+  "key": "tsd.storage.fix_duplicates",
+  "cl-option": "--tsd-fixdups",
+  "defaultValue": "false",
+  "description": "Optionally fix all duplicate datapoints automatically",
+  "help": "extended",
+  "meta": "BOOL"
+ }  
 ],
 "bindings" : [ 
 	"importPackage(Packages.java.lang);",
