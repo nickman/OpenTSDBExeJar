@@ -112,6 +112,7 @@ public class ConfigArgP {
 					config.overrideConfig(ci.key, processConfigValue(ci.getValue()));
 				}
 			}
+			config.loadStaticVariables();
 			// find --config and --include-config in argp and load into config 
 			//		validate
 			//argp.parse(args);
