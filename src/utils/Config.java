@@ -241,8 +241,7 @@ public class Config {
    * @param value The value to store
    */
   public void overrideConfig(final String property, final String value) {
-    this.properties.put(property, value);
-    loadStaticVariables();
+    this.properties.put(property, value);    
   }
 
   /**
@@ -568,7 +567,7 @@ public class Config {
    * Loads the static class variables for values that are called often. This
    * should be called any time the configuration changes.
    */
-  protected void loadStaticVariables() {
+  public void loadStaticVariables() {
     auto_metric = this.getBoolean("tsd.core.auto_create_metrics");
     auto_tagk = this.getBoolean("tsd.core.auto_create_tagks");
     auto_tagv = this.getBoolean("tsd.core.auto_create_tagvs");
