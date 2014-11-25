@@ -5,11 +5,13 @@ aclocal.m4
 autom4te.cache
 build
 target
+mavenview
 config.log
 config.status
 configure
 pom.xml
 *.pyc
+*.bak
 .*.swp
 *.rrd
 *.class
