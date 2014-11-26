@@ -13,17 +13,21 @@
 package net.opentsdb.tsd;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.google.common.net.HttpHeaders;
-import com.stumbleupon.async.Callback;
-import com.stumbleupon.async.Deferred;
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import net.opentsdb.BuildData;
+import net.opentsdb.core.Aggregators;
+import net.opentsdb.core.TSDB;
+import net.opentsdb.stats.StatsCollector;
+import net.opentsdb.utils.Config;
+import net.opentsdb.utils.JSON;
 
 import org.jboss.netty.channel.Channel;
 import org.jboss.netty.channel.ChannelHandlerContext;
@@ -32,12 +36,12 @@ import org.jboss.netty.channel.SimpleChannelUpstreamHandler;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpRequest;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import net.opentsdb.BuildData;
-import net.opentsdb.core.Aggregators;
-import net.opentsdb.core.TSDB;
-import net.opentsdb.stats.StatsCollector;
-import net.opentsdb.utils.JSON;
+import com.google.common.net.HttpHeaders;
+import com.stumbleupon.async.Callback;
+import com.stumbleupon.async.Deferred;
 
 /**
  * Stateless handler for RPCs (telnet-style or HTTP).
@@ -65,6 +69,14 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 
   /** The TSDB to use. */
   private final TSDB tsdb;
+  
+	/** The config key for the TSD RPC addin classes */
+	public static final String TSD_RPC_ADDIN_KEY = "tsd.addins.rpcs";
+	/** The config key for the TSD RPC addin classpath */
+	public static final String TSD_RPC_ADDIN_CP_KEY = "tsd.addins.rpcs.classpath";
+	/** The template for the classloader MBean's ObjectName */
+	public static final String CLASSLOADER_OBJECTNAME = "net.opentsdb.classpath:type=ClassLoader,name=%s.classpath";
+	
 
   /**
    * Constructor that loads the CORS domain list and configures the route maps 
@@ -165,6 +177,8 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 
     telnet_commands.put("exit", new Exit());
     telnet_commands.put("help", new Help());
+    
+    installAddinRPCs();
   }
 
   @Override
@@ -622,5 +636,101 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
   private void logError(final Channel chan, final String msg, final Exception e) {
     LOG.error(chan.toString() + ' ' + msg, e);
   }
+  
+	//================================================================================================
+	//	  RPC Addins
+	//================================================================================================
+	
+	/**
+	 * Creates an ObjectName from the passed name
+	 * @param name The name
+	 * @return the ObjectName
+	 */
+	private static final ObjectName objectName(final String name) {
+		try {
+			return new ObjectName(name.trim());
+		} catch (Exception ex) {
+			throw new RuntimeException("Failed to create ObjectName from [" + name + "]", ex);
+		}
+	}
+	
+	/**
+	 * Installs the Addin RPCs
+	 */
+	protected void installAddinRPCs() {
+		final Config cfg = tsdb.getConfig();
+		final ClassLoader defaultCl = Thread.currentThread().getContextClassLoader();
+		final ClassLoader rpcCl = getAddinRPCClassLoader(cfg);
+		if(cfg.hasProperty(TSD_RPC_ADDIN_KEY)) {
+			String classConfig = cfg.getString(TSD_RPC_ADDIN_KEY);
+			String[] classes = classConfig.split(",");
+			for(String className: classes) {
+				Class<?> clazz = null;
+				className = className.trim();
+				if(className.isEmpty()) continue;
+				try {
+					clazz = Class.forName(className, true, defaultCl);
+				} catch (ClassNotFoundException ex) {
+					try {
+						if(rpcCl==null) throw ex;
+						clazz = Class.forName(className, true, rpcCl);
+					} catch (ClassNotFoundException ex2) {
+						throw new RuntimeException("Failed to load configured RPC Addin Class [" + className + "]", ex2);
+					}
+				}
+				AddinRPC rpc = null;
+				try {
+					rpc = (AddinRPC) clazz.newInstance();
+				} catch (Exception ex) {
+					throw new RuntimeException("Failed to insantiate RPC [" + clazz.getName() + "]", ex);
+				}
+				if(rpc.isTelnetRpc())  {
+					if(telnet_commands.containsKey(rpc.getTelnetKey())) {
+						LOG.warn("Skipping Telnet Addin RPC [{}] because it's key [{}] is already registered", rpc.getTelnetRpc().getClass().getName(), rpc.getTelnetKey());
+					} else {
+						telnet_commands.put(rpc.getTelnetKey(), rpc.getTelnetRpc());
+						LOG.info("Installed Addin TelnetRpc [{}] under key [{}]", rpc.getTelnetRpc().getClass().getName(),  rpc.getTelnetKey() + "]");
+					}
+				}
+				if(rpc.isHttpRpc())  {
+					if(http_commands.containsKey(rpc.getHttpKey())) {
+						LOG.warn("Skipping Http Addin RPC [{}] because it's key [{}] is already registered", rpc.getHttpRpc().getClass().getName(), rpc.getHttpKey());
+					} else {
+						http_commands.put(rpc.getHttpKey(), rpc.getHttpRpc());
+						LOG.info("Installed Addin HttpRpc [{}] under key [{}]", rpc.getHttpRpc().getClass().getName(),  rpc.getHttpKey() + "]");
+					}
+					
+				}
+				
+			}
+		}
+	}
+	
+	
+	/**
+	 * Acquires the Addin RPC classloader
+	 * @param cfg The TSDB configuration
+	 * @return The RPC classloader or null if one was not configured
+	 */
+	protected ClassLoader getAddinRPCClassLoader(final Config cfg) {
+		if(cfg.hasProperty(TSD_RPC_ADDIN_CP_KEY)) {
+			if(!cfg.getString(TSD_RPC_ADDIN_CP_KEY).trim().isEmpty()) {
+				final ObjectName on = objectName(String.format(CLASSLOADER_OBJECTNAME, TSD_RPC_ADDIN_KEY));
+				final MBeanServer server = ManagementFactory.getPlatformMBeanServer();
+				try {
+					if(server.isRegistered(on) && server.isInstanceOf(on, ClassLoader.class.getName())) {
+						return server.getClassLoader(on);
+					}						
+				} catch (Exception ex) {
+					LOG.error("Failed to get RPC ClassLoader", ex);					
+				}
+			}
+		}
+		return null;
+	}
+	
+	//================================================================================================
+
+  
 
 }
