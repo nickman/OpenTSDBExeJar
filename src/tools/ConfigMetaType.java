@@ -20,6 +20,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import net.opentsdb.tools.ConfigArgP.ConfigurationItem;
 
@@ -62,7 +63,9 @@ public enum ConfigMetaType implements ArgValueValidator {
 	/** A znode path name */
 	ZPATH("A znode path name", new StringValidator("ZPATH")),
 	/** The read write mode */
-	RWMODE("Read/Write mode specification", new ReadWriteModeValidator());
+	RWMODE("Read/Write mode specification", new ReadWriteModeValidator()),
+	/** The read write mode */
+	BCLASSLIST("A comma separated list of loadable classes", new ReadWriteModeValidator());
 	
 	
 	
@@ -123,7 +126,7 @@ public enum ConfigMetaType implements ArgValueValidator {
 				"ro"				// READ ONLY
 		)));
 		/**
-		 * Creates a new IntegerValidator
+		 * Creates a new ReadWriteModeValidator
 		 */
 		public ReadWriteModeValidator() {
 			
@@ -143,6 +146,44 @@ public enum ConfigMetaType implements ArgValueValidator {
 			}
 		}
 	}
+	
+	/**
+	 * <p>Title: ClassListValidator</p>
+	 * <p>Description: Validator for loadable class lists</p> 
+	 * @author Whitehead (nwhitehead AT heliosdev DOT org)
+	 * <p><code>net.opentsdb.tools.ConfigMetaType.ClassListValidator</code></p>
+	 */
+	public static class ClassListValidator implements ArgValueValidator {
+		/** Comma splitter */
+		private static final Pattern COMMA_SPLITTER = Pattern.compile(",");
+		/**
+		 * Creates a new ClassListValidator
+		 */
+		public ClassListValidator() {
+			
+		}		
+		
+		/**
+		 * {@inheritDoc}
+		 * @see net.opentsdb.tools.ArgValueValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
+		 */
+		@Override
+		public void validate(final ConfigurationItem citem) {			
+			final String val = citem.getValue();
+			if(val.trim().isEmpty()) return;
+			final String[] classNames = COMMA_SPLITTER.split(val.trim());
+			for(String className: classNames) {
+				className = className.trim();
+				if(className.isEmpty()) continue;
+				try {
+					Class.forName(className);
+				} catch (Exception ex) {
+					throw new IllegalArgumentException("Failed to load class [" + className + "] defined in configuration item [" + citem.getName() + "]", ex);
+				}
+			}
+		}
+	}
+	
 	
 	/**
 	 * <p>Title: IntegerValidator</p>

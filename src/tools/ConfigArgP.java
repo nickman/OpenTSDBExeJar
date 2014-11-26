@@ -17,6 +17,8 @@ import java.io.InputStream;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -52,10 +54,10 @@ public class ConfigArgP {
 	protected String[] nonOptionArgs = {};
 	/** The base configuration */
 	protected final Config config;
-	/** The raw configuration items loaded from the json file keyed by the item key */
-	protected final Map<String, ConfigurationItem> configItemsByKey = new HashMap<String, ConfigurationItem>();
+	/** The raw configuration items loaded from the json file */
+	protected final Set<ConfigurationItem> configItemsByKey = new TreeSet<ConfigurationItem>();
 	/** The raw configuration items loaded from the json file keyed by the cl-option */
-	protected final Map<String, ConfigurationItem> configItemsByCl = new HashMap<String, ConfigurationItem>();
+	protected final Set<ConfigurationItem> configItemsByCl = new TreeSet<ConfigurationItem>();
 	
 	/** The regex pattern to perform a substitution for <b><pre><code>${&lt;sysprop&gt;:&lt;default&gt;}</code></pre></b> patterns in strings */
 	public static final Pattern SYS_PROP_PATTERN = Pattern.compile("\\$\\{(.*?)(?::(.*?))??\\}");
@@ -83,14 +85,15 @@ public class ConfigArgP {
 		InputStream is = null;
 		
 		try {
-			config = new Config();
+			final Config loadConfig = new NoLoadConfig();
 			is = ConfigArgP.class.getClassLoader().getResourceAsStream("opentsdb.conf.json");
 			ObjectMapper jsonMapper = new ObjectMapper();
 			JsonNode root = jsonMapper.reader().readTree(is);
 			JsonNode configRoot = root.get("config-items");
 			scriptEngine.eval("var config = " + configRoot.toString() + ";");
 			processBindings(jsonMapper, root);
-			ConfigurationItem[] items = jsonMapper.reader(ConfigurationItem[].class).readValue(configRoot);
+			final ConfigurationItem[] items = jsonMapper.reader(ConfigurationItem[].class).readValue(configRoot);
+			Arrays.sort(items);
 			LOG.info("Loaded [{}] Configuration Items from opentsdb.conf.json", items.length);
 			for(ConfigurationItem ci: items) {
 				LOG.debug("Processing CI [{}]", ci.getKey());
@@ -101,21 +104,22 @@ public class ConfigArgP {
 					argp.addOption(ci.clOption, ci.description);
 					if("default".equals(ci.help)) dargp.addOption(ci.clOption, ci.description);
 				}
-				if(configItemsByKey.put(ci.key, ci)!=null) {
+				if(!configItemsByKey.add(ci)) {
 					throw new RuntimeException("Duplicate configuration key [" + ci.key + "] in opentsdb.conf.json. Programmer Error.");
 				}
-				if(configItemsByCl.put(ci.clOption, ci)!=null) {
+				if(!configItemsByCl.add(ci)) {
 					throw new RuntimeException("Duplicate configuration command line option [" + ci.clOption + "] in opentsdb.conf.json. Programmer Error.");
 				}				
 				if(ci.getDefaultValue()!=null) {
 					ci.setValue(processConfigValue(ci.getDefaultValue()));								
-					config.overrideConfig(ci.key, processConfigValue(ci.getValue()));
+					loadConfig.overrideConfig(ci.key, processConfigValue(ci.getValue()));
 				}
 			}
-			config.loadStaticVariables();
+			//loadConfig.loadStaticVariables();
 			// find --config and --include-config in argp and load into config 
 			//		validate
 			//argp.parse(args);
+			this.config = new Config(loadConfig);
 			nonOptionArgs = applyArgs(args);
 		} catch (Exception ex) {
 			if(ex instanceof IllegalArgumentException) {
@@ -124,6 +128,24 @@ public class ConfigArgP {
 			throw new RuntimeException("Failed to read opentsdb.conf.json", ex);
 		} finally {
 			if(is!=null) try { is.close(); } catch (Exception x) { /* No Op */ }
+		}
+	}
+	
+	/**
+	 * <p>Title: NoLoadConfig</p>
+	 * <p>Description: A {@link Config} override that does not trigger {@link Config#loadStaticVariables()} when {@link Config#overrideConfig(String, String)} is called.</p> 
+	 * <p>Company: Helios Development Group LLC</p>
+	 * @author Whitehead (nwhitehead AT heliosdev DOT org)
+	 * <p><code>net.opentsdb.tools.ConfigArgP.NoLoadConfig</code></p>
+	 */
+	private static class NoLoadConfig extends Config {
+		/**
+		 * {@inheritDoc}
+		 * @see net.opentsdb.utils.Config#overrideConfig(java.lang.String, java.lang.String)
+		 */
+		@Override
+		public void overrideConfig(final String property, final String value) {
+			this.properties.put(property, value);
 		}
 	}
 
@@ -137,10 +159,10 @@ public class ConfigArgP {
 		LOG.debug("Applying Command Line Args {}", Arrays.toString(args));
 		String[] nonArgs = argp.parse(args);
 		LOG.debug("Applying Command Line ArgP {}", argp);
-		LOG.debug("configItemsByCl Keys: [{}]", configItemsByCl.keySet());
+		LOG.debug("configItemsByCl Keys: [{}]", configItemsByCl.toString());
 		for(Map.Entry<String, String> entry: argp.getParsed().entrySet()) {
 			String key = entry.getKey(), value = entry.getValue();
-			ConfigurationItem citem = configItemsByCl.get(key);
+			ConfigurationItem citem = getConfigurationItemByKey(configItemsByCl, key);
 			LOG.debug("Loaded CI for command line option [{}]: Found:{}", key, citem!=null);
 			if(citem.getMeta()==null) {				
 				citem.setValue(value!=null ? value : "true");
@@ -155,12 +177,29 @@ public class ConfigArgP {
 		return nonArgs;
 	}
 	
+	private ConfigurationItem getConfigurationItemByKey(final Set<ConfigurationItem> source, final String key) {
+		for(final ConfigurationItem ci: source) {
+			if(ci.getKey().equals(key)) return ci;
+		}
+		return null;
+	}
+	
+	/**
+	 * Returns the {@link ConfigurationItem} with the passed key
+	 * @param key The key of the item to fetch
+	 * @return The matching ConfigurationItem or null if one was not found
+	 */
+	public ConfigurationItem getConfigurationItem(final String key) {
+		if(key==null || key.trim().isEmpty()) throw new IllegalArgumentException("The passed key was null or empty");
+		return getConfigurationItemByKey(configItemsByKey, key);
+	}
+	
 	/**
 	 * {@inheritDoc}
 	 */
 	public String toString() {
 		StringBuilder b = new StringBuilder();
-		for(ConfigurationItem ci: configItemsByKey.values()) {
+		for(ConfigurationItem ci: configItemsByKey) {
 			b.append(ci.toString()).append("\n");
 		}
 		return b.toString();
@@ -289,7 +328,7 @@ public class ConfigArgP {
 	 * @author Whitehead (nwhitehead AT heliosdev DOT org)
 	 * <p><code>net.opentsdb.tools.ConfigArp.ConfigurationItem</code></p>
 	 */
-	public static class ConfigurationItem {
+	public static class ConfigurationItem implements Comparable<ConfigurationItem> {
 		/** The internal configuration key */
 		@JsonProperty("key")
 		protected String key;
@@ -386,9 +425,9 @@ public class ConfigArgP {
 		 * Sets a new value for this item
 		 * @param newValue The new value
 		 */
-		public void setValue(String newValue) {
+		public void setValue(final String newValue) {
 			final String currValue = newValue;
-			value = newValue;
+			value = newValue.trim();
 			try {
 				validate();
 			} catch (IllegalArgumentException ex) {
@@ -472,6 +511,20 @@ public class ConfigArgP {
 			} else if (!key.equals(other.key))
 				return false;
 			return true;
+		}
+
+		/**
+		 * <p>Sorts {@link ConfigurationItem}s by the underlying {@link ConfigMetaType}</p>
+		 * {@inheritDoc}
+		 * @see java.lang.Comparable#compareTo(java.lang.Object)
+		 */
+		@Override
+		public int compareTo(final ConfigurationItem other) {
+			if(other.meta==null || other.meta.isEmpty()) return 0;
+			if(meta==null || meta.isEmpty()) return 1;
+			final ConfigMetaType otherType = ConfigMetaType.byName(other.meta); 
+			final ConfigMetaType thisType = ConfigMetaType.byName(meta);
+			return thisType.compareTo(otherType);
 		}
 	}
 

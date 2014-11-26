@@ -200,7 +200,7 @@
  {
   "key": "tsd.http.request.max_chunk",
   "cl-option": "--max-chunks",
-  "defaultValue": "4096",
+  "defaultValue": "81920",
   "description": "The maximum number of chunks that will be aggregated",
   "help": "extended",
   "meta": "POSINT"
@@ -269,7 +269,7 @@
  {
   "key": "tsd.http.request.enable_chunked",
   "cl-option": "--enable-chunked",
-  "defaultValue": "false",
+  "defaultValue": "true",
   "description": "Enables the aggregation of HTTP chunks into a single chunk",
   "help": "extended"
  },
@@ -380,7 +380,16 @@
   "description": "Optionally fix all duplicate datapoints automatically",
   "help": "extended",
   "meta": "BOOL"
+ },
+ {
+  "key": "tsd.addin.rpcs",
+  "cl-option": "--tsd-addin-rpcs",
+  "defaultValue": "",
+  "description": "An array of TSD RPC Handler Plugin class names",
+  "help": "extended",
+  "meta": "BCLASSLIST"
  }  
+   
 ],
 "bindings" : [ 
 	"importPackage(Packages.java.lang);",

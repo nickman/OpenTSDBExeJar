@@ -241,7 +241,8 @@ public class Config {
    * @param value The value to store
    */
   public void overrideConfig(final String property, final String value) {
-    this.properties.put(property, value);    
+    this.properties.put(property, value);
+    loadStaticVariables();
   }
 
   /**
@@ -414,7 +415,7 @@ public class Config {
    * This should be called in the constructor
    */
   protected void setDefaults() {
-    // map.put("tsd.network.port", ""); // does not have a default, required
+	default_map.put("tsd.network.port", "4242"); // does not have a default, required
     // map.put("tsd.http.cachedir", ""); // does not have a default, required
     // map.put("tsd.http.staticroot", ""); // does not have a default, required
     default_map.put("tsd.mode", "rw");

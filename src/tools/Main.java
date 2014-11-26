@@ -196,7 +196,7 @@ public class Main {
 		Config c = config.getConfig();
 		for(String key: p.stringPropertyNames()) {
 			String value = p.getProperty(key);
-			ConfigurationItem ci = config.configItemsByKey.get(key);			
+			ConfigurationItem ci = config.getConfigurationItem(key);			
 			if(ci!=null) { // if we recognize the key, validate it
 				ci.setValue(value);
 			}
