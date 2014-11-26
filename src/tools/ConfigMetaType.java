@@ -14,13 +14,19 @@ package net.opentsdb.tools;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.regex.Pattern;
+
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+import javax.management.loading.MLet;
 
 import net.opentsdb.tools.ConfigArgP.ConfigurationItem;
 
@@ -46,6 +52,8 @@ public enum ConfigMetaType implements ArgValueValidator {
 	EFILE("An existing file", new FileSystemValidator(false, true)),
 	/** A list of existing files or URLs */
 	FILELIST("A list of existing files or accessible URLs", new FileListValidator()),
+	/** A list of existing files or URLs that comprise a classpath, and when this option is loaded, a ClassLoader MBean will be registered */
+	CLASSPATH("A list of comma separated existing files or accessible URLs", new ClassPathValidator()),	
 	/** A file, optionally existing */
 	FILE("A file, optionally existing", new FileSystemValidator(false, false)), 
 	/** An existing directory */
@@ -63,10 +71,14 @@ public enum ConfigMetaType implements ArgValueValidator {
 	/** A znode path name */
 	ZPATH("A znode path name", new StringValidator("ZPATH")),
 	/** The read write mode */
-	RWMODE("Read/Write mode specification", new ReadWriteModeValidator()),
-	/** The read write mode */
-	BCLASSLIST("A comma separated list of loadable classes", new ReadWriteModeValidator());
+	RWMODE("Read/Write mode specification", new ReadWriteModeValidator()),	
+	/** A list of comma separated class names that should be loadable with (or without) the assistance of a {@link #CLASSPATH} configured classloader */
+	BCLASSLIST("A comma separated list of loadable classes", new ClasspathConfiguredClassList());
 	
+	/** The platform MBeanServer */
+	public static final MBeanServer server = ManagementFactory.getPlatformMBeanServer();
+	/** Comma splitter */
+	public static final Pattern COMMA_SPLITTER = Pattern.compile(",");
 	
 	
 	/**
@@ -108,7 +120,7 @@ public enum ConfigMetaType implements ArgValueValidator {
 	 * @see net.opentsdb.tools.ArgValueValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
 	 */
 	@Override
-	public void validate(ConfigurationItem citem) {
+	public void validate(final ConfigurationItem citem) {
 		validator.validate(citem);		
 	}
 
@@ -154,8 +166,6 @@ public enum ConfigMetaType implements ArgValueValidator {
 	 * <p><code>net.opentsdb.tools.ConfigMetaType.ClassListValidator</code></p>
 	 */
 	public static class ClassListValidator implements ArgValueValidator {
-		/** Comma splitter */
-		private static final Pattern COMMA_SPLITTER = Pattern.compile(",");
 		/**
 		 * Creates a new ClassListValidator
 		 */
@@ -205,7 +215,7 @@ public enum ConfigMetaType implements ArgValueValidator {
 		 * @see net.opentsdb.tools.ArgValueValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
 		 */
 		@Override
-		public void validate(ConfigurationItem citem) {			
+		public void validate(final ConfigurationItem citem) {			
 			try {
 				int i = Integer.parseInt(citem.getValue());
 				if(pos && i < 0) throw EX;
@@ -227,7 +237,7 @@ public enum ConfigMetaType implements ArgValueValidator {
 		 * @see net.opentsdb.tools.ArgValueValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
 		 */
 		@Override
-		public void validate(ConfigurationItem citem) {
+		public void validate(final ConfigurationItem citem) {
 			if(!"true".equalsIgnoreCase(citem.getValue()) && !"false".equalsIgnoreCase(citem.getValue())) {
 				throw new IllegalArgumentException("Invalid Boolean value [" + citem.getValue() + "] for " + citem.getName());				
 			}
@@ -256,7 +266,7 @@ public enum ConfigMetaType implements ArgValueValidator {
 		 * @see net.opentsdb.tools.ArgValueValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
 		 */
 		@Override
-		public void validate(ConfigurationItem citem) {
+		public void validate(final ConfigurationItem citem) {
 			if(citem.getValue()==null || citem.getValue().trim().isEmpty()) {
 				throw new IllegalArgumentException("Null or empty " + name + " value for " + citem.getName());
 			}
@@ -282,7 +292,7 @@ public enum ConfigMetaType implements ArgValueValidator {
 		 * @see net.opentsdb.tools.ConfigMetaType.StringValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
 		 */
 		@Override
-		public void validate(ConfigurationItem citem) {
+		public void validate(final ConfigurationItem citem) {
 			super.validate(citem);
 			try {
 				Class.forName(citem.getValue().trim(), true, ConfigMetaType.class.getClassLoader());
@@ -291,6 +301,58 @@ public enum ConfigMetaType implements ArgValueValidator {
 			}
 		}
 	}
+	
+	/**
+	 * <p>Title: BootLoadableClassValidator</p>
+	 * <p>Description: A validator for a comma separated list of classnames for which a supplementary
+	 * classpath has been specified in a {@link #FILELIST} configuration item named the same as this one
+	 * but with <b><code>.classpath</code></b> appended.</p> 
+	 * @author Whitehead (nwhitehead AT heliosdev DOT org)
+	 * <p><code>net.opentsdb.tools.ConfigMetaType.ClasspathConfiguredClassList</code></p>
+	 */
+	public static class ClasspathConfiguredClassList implements ArgValueValidator {
+		/** The template for the classloader MBean's ObjectName */
+		public static final String CLASSLOADER_OBJECTNAME = "net.opentsdb.classpath:type=ClassLoader,name=%s.classpath";
+		
+		/**
+		 * Creates a new ClasspathConfiguredClassList
+		 */
+		public ClasspathConfiguredClassList() {		
+			
+		}
+		/**
+		 * {@inheritDoc}
+		 * @see net.opentsdb.tools.ConfigMetaType.StringValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
+		 */
+		@Override
+		public void validate(final ConfigurationItem citem) {
+			Set<String> classNames = new LinkedHashSet<String>(Arrays.asList(COMMA_SPLITTER.split(citem.getValue())));
+			if(classNames.isEmpty()) return;
+			for(final Iterator<String> iter = classNames.iterator(); iter.hasNext();) {
+				String fileName = iter.next().trim();
+				if(fileName.isEmpty()) iter.remove();				
+			}
+			if(classNames.isEmpty()) return;
+			String className = null;
+			try {
+				final ClassLoader CL;
+				final ObjectName on = new ObjectName(String.format(CLASSLOADER_OBJECTNAME, citem.getKey()));				
+				if(server.isRegistered(on)) {
+					CL = server.getClassLoader(on);
+				} else {
+					CL = Thread.currentThread().getContextClassLoader();
+				}
+				for(String cl: classNames) {
+					className = cl.trim();
+					Class.forName(className, true, CL);
+				}
+				Class.forName(citem.getValue().trim(), true, ConfigMetaType.class.getClassLoader());
+			} catch (Exception ex) {
+				throw new IllegalArgumentException("Failed to load boot time class [" + className + "] for " + citem.getName());
+			}
+		}
+	}
+	
 	
 
 	/**
@@ -318,7 +380,7 @@ public enum ConfigMetaType implements ArgValueValidator {
 		 * @see net.opentsdb.tools.ArgValueValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
 		 */
 		@Override
-		public void validate(ConfigurationItem citem) {
+		public void validate(final ConfigurationItem citem) {
 			String value = citem.getValue();
 			File target = new File(value);
 			if(mustExist) {
@@ -366,8 +428,18 @@ public enum ConfigMetaType implements ArgValueValidator {
 		 * @see net.opentsdb.tools.ConfigMetaType.StringValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
 		 */
 		@Override
-		public void validate(ConfigurationItem citem) {
-			String[] files = citem.getValue().split(",");
+		public void validate(final ConfigurationItem citem) {
+			buildURLSet(citem);
+		}
+		
+		/**
+		 * Builds a set of URLs from the configured file list and validates each one
+		 * @param citem The configuration item
+		 * @return A [possibly empty] set of URLs
+		 */
+		protected Set<URL> buildURLSet(final ConfigurationItem citem) {
+			final Set<URL> urls = new LinkedHashSet<URL>();
+			String[] files = COMMA_SPLITTER.split(citem.getValue());
 			Set<String> failed = new LinkedHashSet<String>();
 			for(String file: files) {
 				String name = file.trim();
@@ -377,12 +449,18 @@ public enum ConfigMetaType implements ArgValueValidator {
 				try {
 					url = new URL(name);
 					isURL = true;
+					urls.add(url);
 				} catch (Exception ex) { /* No Op */ }
 				if(isURL) continue;
 				File f = new File(name);
 				if(f.exists() && f.canRead()) {
-					if(f.isDirectory()) {
-						failed.add(name + ":Not a file");
+//					if(f.isDirectory()) {
+//						failed.add(name + ":Not a file");
+//					}
+					try {
+						urls.add(f.toURI().toURL());
+					} catch (Exception ex) {
+						failed.add(name + ":Could not convert to URL");
 					}
 				} else {
 					failed.add(name + ":Not found");
@@ -396,10 +474,40 @@ public enum ConfigMetaType implements ArgValueValidator {
 				}
 				throw new IllegalArgumentException("Invalid Files or URLs in File List for " + citem.getName() + "\n" + b.toString());				
 			}
+			
+			return urls;
 		}
 		
 	}
 
+	/**
+	 * <p>Title: ClassPathValidator</p>
+	 * <p>Description: A class path validator and ClassLoader factory</p> 
+	 * <p>Company: Helios Development Group LLC</p>
+	 * @author Whitehead (nwhitehead AT heliosdev DOT org)
+	 * <p><code>net.opentsdb.tools.ConfigMetaType.ClassPathValidator</code></p>
+	 */
+	public static class ClassPathValidator extends FileListValidator {
+		/** The template for the classloader MBean's ObjectName */
+		public static final String CLASSLOADER_OBJECTNAME = "net.opentsdb.classpath:type=ClassLoader,name=%s";
+		
+		/**
+		 * {@inheritDoc}
+		 * @see net.opentsdb.tools.ConfigMetaType.FileListValidator#validate(net.opentsdb.tools.ConfigArgP.ConfigurationItem)
+		 */
+		@Override
+		public void validate(final ConfigurationItem citem) {
+			Set<URL> urls = buildURLSet(citem);
+			final MLet classLoader = new MLet(urls.toArray(new URL[urls.size()]));
+			try {
+				final ObjectName on = new ObjectName(String.format(CLASSLOADER_OBJECTNAME, citem.getKey()));
+				server.registerMBean(classLoader, on);
+			} catch (Exception ex) {
+				throw new IllegalArgumentException("Failed to create class loader for [" + citem.getName() + "]", ex);	
+			}
+			
+		}
+	}
 	
 	
 }

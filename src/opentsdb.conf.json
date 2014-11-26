@@ -381,8 +381,16 @@
   "help": "extended",
   "meta": "BOOL"
  },
+{
+  "key": "tsd.addins.rpcs.classpath",
+  "cl-option": "--tsd-addin-cp",
+  "defaultValue": "",
+  "description": "An array of TSD RPC Handler Plugin URL or file classpath entries",
+  "help": "extended",
+  "meta": "CLASSPATH"
+ }, 
  {
-  "key": "tsd.addin.rpcs",
+  "key": "tsd.addins.rpcs",
   "cl-option": "--tsd-addin-rpcs",
   "defaultValue": "",
   "description": "An array of TSD RPC Handler Plugin class names",

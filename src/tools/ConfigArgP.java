@@ -55,14 +55,19 @@ public class ConfigArgP {
 	/** The base configuration */
 	protected final Config config;
 	/** The raw configuration items loaded from the json file */
-	protected final Set<ConfigurationItem> configItemsByKey = new TreeSet<ConfigurationItem>();
-	/** The raw configuration items loaded from the json file keyed by the cl-option */
-	protected final Set<ConfigurationItem> configItemsByCl = new TreeSet<ConfigurationItem>();
+	protected final TreeSet<ConfigurationItem> configItemsByKey = new TreeSet<ConfigurationItem>();
+	/** The raw configuration items loaded from the json file  */
+	protected final TreeSet<ConfigurationItem> configItemsByCl = new TreeSet<ConfigurationItem>();
 	
 	/** The regex pattern to perform a substitution for <b><pre><code>${&lt;sysprop&gt;:&lt;default&gt;}</code></pre></b> patterns in strings */
 	public static final Pattern SYS_PROP_PATTERN = Pattern.compile("\\$\\{(.*?)(?::(.*?))??\\}");
 	/** The regex pattern to perform a substitution for <b><pre><code>$[&lt;javascript snippet&gt;]</code></pre></b> patterns in strings */
 	public static final Pattern JS_PATTERN = Pattern.compile("\\$\\[(.*?)\\]", Pattern.MULTILINE);
+	
+	/** The config key for the TSD RPC addin classes */
+	public static final String TSD_RPC_ADDIN_KEY = "tsd.addins.rpcs";
+	/** The config key for the TSD RPC addin classpath */
+	public static final String TSD_RPC_ADDIN_CP_KEY = "tsd.addins.rpcs.classpath";
 
 	/** Indicates if we're on Windows, in which case the SysProp handling needs a few tweaks */
 	public static final boolean IS_WINDOWS = System.getProperty("os.name").toLowerCase().contains("windows");
@@ -92,9 +97,17 @@ public class ConfigArgP {
 			JsonNode configRoot = root.get("config-items");
 			scriptEngine.eval("var config = " + configRoot.toString() + ";");
 			processBindings(jsonMapper, root);
-			final ConfigurationItem[] items = jsonMapper.reader(ConfigurationItem[].class).readValue(configRoot);
-			Arrays.sort(items);
-			LOG.info("Loaded [{}] Configuration Items from opentsdb.conf.json", items.length);
+			final ConfigurationItem[] loadedItems = jsonMapper.reader(ConfigurationItem[].class).readValue(configRoot);
+			final TreeSet<ConfigurationItem> items = new TreeSet<ConfigurationItem>(Arrays.asList(loadedItems)); 
+			LOG.info("Loaded [{}] Configuration Items from opentsdb.conf.json", items.size());
+//			if(LOG.isDebugEnabled()) {
+				StringBuilder b = new StringBuilder("Configs:");
+				for(ConfigurationItem ci: items) {
+					b.append("\n\t").append(ci.toString());
+				}
+				b.append("\n");
+				LOG.info(b.toString());
+//			}
 			for(ConfigurationItem ci: items) {
 				LOG.debug("Processing CI [{}]", ci.getKey());
 				if(ci.meta!=null) {
@@ -162,7 +175,7 @@ public class ConfigArgP {
 		LOG.debug("configItemsByCl Keys: [{}]", configItemsByCl.toString());
 		for(Map.Entry<String, String> entry: argp.getParsed().entrySet()) {
 			String key = entry.getKey(), value = entry.getValue();
-			ConfigurationItem citem = getConfigurationItemByKey(configItemsByCl, key);
+			ConfigurationItem citem = getConfigurationItemByClOpt(key);
 			LOG.debug("Loaded CI for command line option [{}]: Found:{}", key, citem!=null);
 			if(citem.getMeta()==null) {				
 				citem.setValue(value!=null ? value : "true");
@@ -193,6 +206,21 @@ public class ConfigArgP {
 		if(key==null || key.trim().isEmpty()) throw new IllegalArgumentException("The passed key was null or empty");
 		return getConfigurationItemByKey(configItemsByKey, key);
 	}
+	
+	/**
+	 * Returns the {@link ConfigurationItem} with the passed cl-option
+	 * @param clopt The cl-option of the item to fetch
+	 * @return The matching ConfigurationItem or null if one was not found
+	 */
+	public ConfigurationItem getConfigurationItemByClOpt(final String clopt) {
+		if(clopt==null || clopt.trim().isEmpty()) throw new IllegalArgumentException("The passed cl-opt was null or empty");
+		for(final ConfigurationItem ci: configItemsByCl) {
+			if(ci.getClOption().equals(clopt)) return ci;
+		}
+		return null;
+
+	}
+	
 	
 	/**
 	 * {@inheritDoc}
@@ -520,11 +548,23 @@ public class ConfigArgP {
 		 */
 		@Override
 		public int compareTo(final ConfigurationItem other) {
-			if(other.meta==null || other.meta.isEmpty()) return 0;
-			if(meta==null || meta.isEmpty()) return 1;
+			if(this==other) return 0;
+			if((other.meta==null || other.meta.isEmpty()) && (meta==null || meta.isEmpty())) {
+				return this.key.compareTo(other.key);
+			}
+			if(other.meta==null || other.meta.isEmpty()) {
+				return 1;
+			}
+			if(meta==null || meta.isEmpty()) {
+				return -1;
+			}
 			final ConfigMetaType otherType = ConfigMetaType.byName(other.meta); 
 			final ConfigMetaType thisType = ConfigMetaType.byName(meta);
-			return thisType.compareTo(otherType);
+			int c = thisType.compareTo(otherType);
+			if(c==0) {
+				c = this.key.compareTo(other.key);
+			}
+			return c;
 		}
 	}
 
