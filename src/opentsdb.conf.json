@@ -382,21 +382,20 @@
   "meta": "BOOL"
  },
 {
-  "key": "tsd.addins.rpcs.classpath",
+  "key": "tsd.addin.rpcs.classpath",
   "cl-option": "--tsd-addin-cp",
   "defaultValue": "",
-  "description": "An array of TSD RPC Handler Plugin URL or file classpath entries",
+  "description": "An array of TSD RPC Handler Addin URL or file classpath entries",
   "help": "extended",
   "meta": "CLASSPATH"
- }, 
- {
-  "key": "tsd.addins.rpcs",
-  "cl-option": "--tsd-addin-rpcs",
-  "defaultValue": "",
-  "description": "An array of TSD RPC Handler Plugin class names",
+ },
+  {
+  "key": "tsd.addin.rpcs.packages",
+  "cl-option": "--tsd-addin-packages",
+  "description": "The comma separated package names to restrict RPC add-ins to be enabled",
   "help": "extended",
-  "meta": "BCLASSLIST"
- }  
+  "meta": "LIST"
+ }
    
 ],
 "bindings" : [ 

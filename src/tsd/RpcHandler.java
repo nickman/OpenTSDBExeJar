@@ -17,6 +17,7 @@ import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import javax.management.MBeanServer;
@@ -641,93 +642,39 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 	//	  RPC Addins
 	//================================================================================================
 	
-	/**
-	 * Creates an ObjectName from the passed name
-	 * @param name The name
-	 * @return the ObjectName
-	 */
-	private static final ObjectName objectName(final String name) {
-		try {
-			return new ObjectName(name.trim());
-		} catch (Exception ex) {
-			throw new RuntimeException("Failed to create ObjectName from [" + name + "]", ex);
-		}
-	}
 	
 	/**
 	 * Installs the Addin RPCs
 	 */
 	protected void installAddinRPCs() {
-		final Config cfg = tsdb.getConfig();
-		final ClassLoader defaultCl = Thread.currentThread().getContextClassLoader();
-		final ClassLoader rpcCl = getAddinRPCClassLoader(cfg);
-		if(cfg.hasProperty(TSD_RPC_ADDIN_KEY)) {
-			String classConfig = cfg.getString(TSD_RPC_ADDIN_KEY);
-			String[] classes = classConfig.split(",");
-			for(String className: classes) {
-				Class<?> clazz = null;
-				className = className.trim();
-				if(className.isEmpty()) continue;
-				try {
-					clazz = Class.forName(className, true, defaultCl);
-				} catch (ClassNotFoundException ex) {
-					try {
-						if(rpcCl==null) throw ex;
-						clazz = Class.forName(className, true, rpcCl);
-					} catch (ClassNotFoundException ex2) {
-						throw new RuntimeException("Failed to load configured RPC Addin Class [" + className + "]", ex2);
-					}
+		final TSDRPCAddinFinder finder = new TSDRPCAddinFinder(tsdb.getConfig());
+		if(finder.scan()) {
+			int installed = 0;
+			for(Map.Entry<String, HttpRpc> entry: finder.getLocatedHttpRpcs().entrySet()) {
+				if(http_commands.containsKey(entry.getKey())) {
+					LOG.warn("Skipping Addin HttpRpc [{}] because it's key [{}] is already registered", entry.getValue().getClass().getName(), entry.getKey());
+				} else {
+					http_commands.put(entry.getKey(), entry.getValue());
+					installed++;
+					LOG.info("Installed Addin HttpRpc [{}] under key [{}]", entry.getValue().getClass().getName(), entry.getKey());
 				}
-				AddinRPC rpc = null;
-				try {
-					rpc = (AddinRPC) clazz.newInstance();
-				} catch (Exception ex) {
-					throw new RuntimeException("Failed to insantiate RPC [" + clazz.getName() + "]", ex);
-				}
-				if(rpc.isTelnetRpc())  {
-					if(telnet_commands.containsKey(rpc.getTelnetKey())) {
-						LOG.warn("Skipping Telnet Addin RPC [{}] because it's key [{}] is already registered", rpc.getTelnetRpc().getClass().getName(), rpc.getTelnetKey());
-					} else {
-						telnet_commands.put(rpc.getTelnetKey(), rpc.getTelnetRpc());
-						LOG.info("Installed Addin TelnetRpc [{}] under key [{}]", rpc.getTelnetRpc().getClass().getName(),  rpc.getTelnetKey() + "]");
-					}
-				}
-				if(rpc.isHttpRpc())  {
-					if(http_commands.containsKey(rpc.getHttpKey())) {
-						LOG.warn("Skipping Http Addin RPC [{}] because it's key [{}] is already registered", rpc.getHttpRpc().getClass().getName(), rpc.getHttpKey());
-					} else {
-						http_commands.put(rpc.getHttpKey(), rpc.getHttpRpc());
-						LOG.info("Installed Addin HttpRpc [{}] under key [{}]", rpc.getHttpRpc().getClass().getName(),  rpc.getHttpKey() + "]");
-					}
-					
-				}
-				
 			}
+			LOG.info("Installed {} Addin HttpRpcs", installed);
+			installed = 0;
+			for(Map.Entry<String, TelnetRpc> entry: finder.getLocatedTelnetRpcs().entrySet()) {
+				if(telnet_commands.containsKey(entry.getKey())) {
+					LOG.warn("Skipping Addin TelnetRpc [{}] because it's key [{}] is already registered", entry.getValue().getClass().getName(), entry.getKey());
+				} else {
+					telnet_commands.put(entry.getKey(), entry.getValue());
+					installed++;
+					LOG.info("Installed Addin TelnetRpc [{}] under key [{}]", entry.getValue().getClass().getName(), entry.getKey());
+				}
+			}
+			LOG.info("Installed {} Addin TelnetRpcs", installed);
 		}
 	}
 	
 	
-	/**
-	 * Acquires the Addin RPC classloader
-	 * @param cfg The TSDB configuration
-	 * @return The RPC classloader or null if one was not configured
-	 */
-	protected ClassLoader getAddinRPCClassLoader(final Config cfg) {
-		if(cfg.hasProperty(TSD_RPC_ADDIN_CP_KEY)) {
-			if(!cfg.getString(TSD_RPC_ADDIN_CP_KEY).trim().isEmpty()) {
-				final ObjectName on = objectName(String.format(CLASSLOADER_OBJECTNAME, TSD_RPC_ADDIN_KEY));
-				final MBeanServer server = ManagementFactory.getPlatformMBeanServer();
-				try {
-					if(server.isRegistered(on) && server.isInstanceOf(on, ClassLoader.class.getName())) {
-						return server.getClassLoader(on);
-					}						
-				} catch (Exception ex) {
-					LOG.error("Failed to get RPC ClassLoader", ex);					
-				}
-			}
-		}
-		return null;
-	}
 	
 	//================================================================================================
 
