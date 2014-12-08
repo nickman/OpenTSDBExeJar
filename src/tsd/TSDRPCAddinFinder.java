@@ -27,19 +27,19 @@ package net.opentsdb.tsd;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.lang.management.ManagementFactory;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javassist.ClassPath;
 import javassist.ClassPool;
@@ -47,6 +47,9 @@ import javassist.CtClass;
 import javassist.LoaderClassPath;
 import net.opentsdb.core.TSDB;
 import net.opentsdb.utils.Config;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * <p>Title: TSDRPCAddinFinder</p>
@@ -76,29 +79,55 @@ public class TSDRPCAddinFinder {
 	protected final Map<String, HttpRpc> httpImpls = new HashMap<String, HttpRpc>(); 
 	/** The located annotated TelnetRpc impls */
 	protected final Map<String, TelnetRpc> telnetImpls = new HashMap<String, TelnetRpc>(); 
-	
-	
+	/** The TSDB instance */
+	protected final TSDB tsdb;
 	
 	
 	
 	/**
 	 * Creates a new TSDRPCAddinFinder
-	 * @param config The TSDB config
+	 * @param tsdb The TSDB instance
 	 */
-	public TSDRPCAddinFinder(final Config config) {
+	public TSDRPCAddinFinder(final TSDB tsdb) {
+		this.tsdb = tsdb;
+		// configure the classpaths to scan 
+		addinClasspaths = preClean(tsdb.getConfig(), ADDIN_CP, gatherClasspaths());
+		// configure the allowed packages 
+		addinPackages = preClean(tsdb.getConfig(), ADDIN_PACKAGES);
+	}
+	
+	@SuppressWarnings("resource")
+	private String[] gatherClasspaths() {
+		final Set<File> fpaths = new LinkedHashSet<File>();
+		final Set<String> paths = new LinkedHashSet<String>();
+		for(String s: ManagementFactory.getRuntimeMXBean().getClassPath().split(File.pathSeparator)) {
+			File f = new File(s);
+			if(f.exists()) {
+				fpaths.add(f.getAbsoluteFile());
+			}
+			paths.add(s);
+		}
+		//Collections.addAll(paths, ManagementFactory.getRuntimeMXBean().getClassPath().split(File.pathSeparator));
 		// Get the system class loader URLs, since the TSDB forces classpath changes by adding URLS
 		// directly to the URLClassLoader, so they don't show up in the RuntimeMXBean
 		URLClassLoader ucl = (URLClassLoader)ClassLoader.getSystemClassLoader();
 		URL[] urls = ucl.getURLs();
-		// Create an array of strings from the loaded URLs
-		final String[] cps = new String[urls.length];
+		// Create an array of strings from the loaded URLs		
 		for(int i = 0; i < urls.length; i++) {
-			cps[i] = urls[i].toString();
-		}
-		// configure the classpaths to scan 
-		addinClasspaths = preClean(config, ADDIN_CP, cps);
-		// configure the allowed packages 
-		addinPackages = preClean(config, ADDIN_PACKAGES);
+			final URL url = urls[i];
+			if("file".equals(url.getProtocol())) {
+				File f = new File(url.getFile());
+				if(f.exists()) {
+					f = f.getAbsoluteFile();
+					if(fpaths.add(f)) {
+						paths.add(urls[i].toString());
+					}
+				}
+			} else {
+				paths.add(urls[i].toString());
+			}
+		}		
+		return paths.toArray(new String[paths.size()]);
 	}
 	
 	/**
@@ -107,7 +136,8 @@ public class TSDRPCAddinFinder {
 	 */
 	public boolean scan() {
 		final long start = System.currentTimeMillis();
-		for(String s: addinClasspaths) {				
+		for(String s: addinClasspaths) {		
+			LOG.debug("Inspecting classpath: {}", s);
 			File f = new File(s.trim());
 			if(f.exists()) {
 				if(f.isDirectory()) {
@@ -142,33 +172,6 @@ public class TSDRPCAddinFinder {
 	}
 	
 	
-	private TSDRPCAddinFinder() {
-		final URLClassLoader ucl = (URLClassLoader)ClassLoader.getSystemClassLoader();
-		try {			
-		    Class<?> sysclass = URLClassLoader.class;
-		    
-		    Method method = sysclass.getDeclaredMethod("addURL", URL.class);
-		    method.setAccessible(true);
-		    method.invoke(ucl, new Object[]{ new File("/home/nwhitehead/hprojects/opentsdb/mavenview/target/opentsdb-2.0.0.jar").toURI().toURL() }); 
-			
-		} catch (Exception x) {
-			x.printStackTrace(System.err);
-			throw new RuntimeException(x);
-		}		
-		
-		URL[] urls = ucl.getURLs();
-		final String[] cps = new String[urls.length];
-		for(int i = 0; i < urls.length; i++) {
-			cps[i] = urls[i].toString();
-		}
-		
-		addinClasspaths = cps;
-		for(String s: addinClasspaths) {
-			log("\tCP:" + s);
-		}
-		
-		addinPackages = EMPTY_ARR;		
-	}
 	
 	
 	/**
@@ -180,11 +183,13 @@ public class TSDRPCAddinFinder {
 	 */
 	private static String[] preClean(final Config config, final String property, String...additional) {
 		String[] args = config.hasProperty(property) ? config.getString(property).split(",") : null;
-		if(args==null || args.length==0) return EMPTY_ARR;
-		Set<String> set = new LinkedHashSet<String>(args.length);
-		for(int i = 0; i < args.length; i++) {
-			if(args[i] == null || args[i].trim().isEmpty()) continue;
-			set.add(args[i].trim());
+//		if(args==null || args.length==0) return EMPTY_ARR;
+		Set<String> set = new LinkedHashSet<String>();
+		if(args!=null) {
+			for(int i = 0; i < args.length; i++) {
+				if(args[i] == null || args[i].trim().isEmpty()) continue;
+				set.add(args[i].trim());
+			}
 		}
 		for(int i = 0; i < additional.length; i++) {
 			if(additional[i] == null || additional[i].trim().isEmpty()) continue;
@@ -207,36 +212,7 @@ public class TSDRPCAddinFinder {
 		return false;
 	}
 	
-	@RPC
-	public class Test {
-		
-	}
 
-	public static void main(String[] args) {
-		try {
-			TSDRPCAddinFinder finder = new TSDRPCAddinFinder();
-			for(String s: finder.addinClasspaths) {				
-				File f = new File(s.trim());
-				if(f.exists()) {
-					if(f.isDirectory()) {
-						finder.scan(f.getAbsoluteFile());
-					}
-				} else {
-					try {
-						URL url = new URL(s.trim());
-						finder.scan(url);
-					} catch (Exception x) {/* No Op */}
-				}
-			}
-		} catch (Exception ex) {
-			ex.printStackTrace(System.err);
-		}
-	}
-	
-	public static void log(Object msg) {
-		System.out.println(msg);
-	}
-	
 	/**
 	 * Adds instances of the located RPC handlers to the impl maps
 	 * @param clazz The located class
@@ -245,29 +221,40 @@ public class TSDRPCAddinFinder {
 		final RPC rpc = clazz.getAnnotation(RPC.class);
 		if(rpc==null) return;
 		try {
+			final Object rpcInstance = buildRPCInstance(clazz, tsdb, rpc);
 			String[] names = rpc.httpKeys();
-			if(names.length>0 && HttpRpc.class.isAssignableFrom(clazz)) {				
-				final HttpRpc httpRpc = (HttpRpc)clazz.newInstance();
-				for(final String name: names) {
-					if(httpImpls.containsKey(name)) {
-						HttpRpc wasHereFirst = httpImpls.get(name); 
-						LOG.warn("Configured key {} for HttpRpc {} already allocated for {}", name, clazz.getName(), wasHereFirst.getClass().getName());
-					} else {
-						httpImpls.put(name, httpRpc);
+			if(names.length>0 && rpcInstance instanceof HttpRpc) {		
+				try {
+					final HttpRpc httpRpc = (HttpRpc)rpcInstance;
+					for(final String name: names) {
+						if(httpImpls.containsKey(name)) {
+							HttpRpc wasHereFirst = httpImpls.get(name); 
+							LOG.warn("Configured key {} for HttpRpc {} already allocated for {}", name, clazz.getName(), wasHereFirst.getClass().getName());
+						} else {
+							httpImpls.put(name, httpRpc);
+						}
 					}
+				} catch (Exception ex) {
+					LOG.error("Failed to process installation of HttpRpc class [{}]", clazz.getName(), ex);
+					throw new RuntimeException("Failed to process installation of HttpRpc class:" + clazz.getName(), ex);
 				}
 			}
 			names = rpc.telnetKeys();
-			if(names.length>0 && TelnetRpc.class.isAssignableFrom(clazz)) {				
-				final TelnetRpc telnetRpc = (TelnetRpc)clazz.newInstance();
-				for(final String name: names) {
-					if(telnetImpls.containsKey(name)) {
-						TelnetRpc wasHereFirst = telnetImpls.get(name); 
-						LOG.warn("Configured key {} for TelnetRpc {} already allocated for {}", name, clazz.getName(), wasHereFirst.getClass().getName());
-					} else {
-						telnetImpls.put(name, telnetRpc);
+			if(names.length>0 && rpcInstance instanceof TelnetRpc) {
+				try {
+					final TelnetRpc telnetRpc = (TelnetRpc)rpcInstance;
+					for(final String name: names) {
+						if(telnetImpls.containsKey(name)) {
+							TelnetRpc wasHereFirst = telnetImpls.get(name); 
+							LOG.warn("Configured key {} for TelnetRpc {} already allocated for {}", name, clazz.getName(), wasHereFirst.getClass().getName());
+						} else {
+							telnetImpls.put(name, telnetRpc);
+						}
 					}
-				}
+				} catch (Exception ex) {
+					LOG.error("Failed to process installation of TelnetRpc class [{}]", clazz.getName(), ex);
+					throw new RuntimeException("Failed to process installation of TelnetRpc class:" + clazz.getName(), ex);
+				}					
 			}			
 		} catch (Exception ex) {
 			throw new RuntimeException("Failed to process RPC Class " + clazz.getName(), ex);
@@ -282,7 +269,8 @@ public class TSDRPCAddinFinder {
 		LOG.debug("Scanning Dir {}", dir);
 		final ClassPool cp = new ClassPool(true);		
 		try {
-			final ClassPath path = new LoaderClassPath(new URLClassLoader(new URL[]{dir.toURI().toURL()})); 
+			final ClassLoader CL = new URLClassLoader(new URL[]{dir.toURI().toURL()});
+			final ClassPath path = new LoaderClassPath(CL); 
 			cp.appendClassPath(path);
 			final Set<File> classFiles = findClassFiles(dir, null);
 			for(final File f: classFiles) {
@@ -293,9 +281,21 @@ public class TSDRPCAddinFinder {
 					for(Object ann: ctClazz.getAvailableAnnotations()) {
 						if(RPC.class.isInstance(ann)) {
 							if(isAllowedPackage(ctClazz.getPackageName())) {
-								Class<?> instance = ctClazz.toClass();
-								LOG.debug("@RPC Match: {}", instance.getName());
-								processRPCClass(instance);
+								Class<?> instance = null;
+								try {
+									instance = Class.forName(ctClazz.getName(), true, CL);
+								} catch (Exception ex) {/* No Op */}
+								if(instance!=null) {
+									processRPCClass(instance);
+									break;
+								}
+								try {
+									instance = ctClazz.toClass();
+									LOG.debug("@RPC Match: {}", instance.getName()); 
+									processRPCClass(instance);									
+								} catch (Throwable t) {
+									LOG.error("Failed to load class [{}] from path [{}]. Error: {}", ctClazz.getName(), dir, t.toString());
+								}
 								break;
 							}
 						}
@@ -321,7 +321,8 @@ public class TSDRPCAddinFinder {
 				return;
 			}
 		}
-		final ClassPath path = new LoaderClassPath(new URLClassLoader(new URL[]{url})); 
+		final ClassLoader CL = new URLClassLoader(new URL[]{url});
+		final ClassPath path = new LoaderClassPath(CL); 
 		final ClassPool cp = new ClassPool(true);
 		cp.appendClassPath(path);
 		InputStream is = null;
@@ -336,9 +337,22 @@ public class TSDRPCAddinFinder {
 				for(Object ann: ctClazz.getAvailableAnnotations()) {
 					if(RPC.class.isInstance(ann)) {
 						if(isAllowedPackage(ctClazz.getPackageName())) {
-							Class<?> instance = ctClazz.toClass();
-							LOG.debug("@RPC Match: {}", instance.getName());
-							processRPCClass(instance);
+							Class<?> instance = null;
+							try {
+								instance = Class.forName(ctClazz.getName(), true, CL);
+							} catch (Exception ex) {/* No Op */}
+							if(instance!=null) {
+								processRPCClass(instance);
+								break;
+							}
+							
+							try {
+								instance = ctClazz.toClass();
+								LOG.debug("@RPC Match: {}", instance.getName());
+								processRPCClass(instance);
+							} catch (Throwable t) {
+								LOG.error("Failed to load class [{}] from path [{}]. Error: {}", ctClazz.getName(), url, t.toString());
+							}
 							break;
 						}						
 					}
@@ -351,6 +365,45 @@ public class TSDRPCAddinFinder {
 			if(is!=null) try { is.close(); } catch (Exception x) {/* No Op */}
 		}
 	}
+	
+	/**
+	 * Builds the RPC Class instance
+	 * @param rpcClass The RPC class
+	 * @param tsdb The TSDB instance
+	 * @param rpc The RPC annotation
+	 * @return the RPC instance
+	 * @throws Exception thrown on any error 
+	 */
+	protected Object buildRPCInstance(final Class<?> rpcClass, final TSDB tsdb, final RPC rpc) throws Exception {
+		boolean withTSDBArg = true;
+		if(rpc.singleton()) {
+			Method m = null;			 
+			try {
+				m = rpcClass.getDeclaredMethod("getInstance", TSDB.class);
+				withTSDBArg = true;
+			} catch (NoSuchMethodException nsme) {
+				m = rpcClass.getDeclaredMethod("getInstance");
+				withTSDBArg = false;
+			}
+			if(!Modifier.isStatic(rpcClass.getModifiers())) {
+				LOG.error("RPC Class [{}] is annotated as a singleton but getInstance method was not static", rpcClass.getName());
+				throw new Exception("RPC Class " + rpcClass.getName() + " is annotated as a singleton but getInstance method was not static");
+			}
+			return withTSDBArg ? m.invoke(null, tsdb) : m.invoke(null); 					
+		} else {
+			Constructor<?> ctor = null;
+			try {
+				ctor = rpcClass.getDeclaredConstructor(TSDB.class);
+				withTSDBArg = true;
+			} catch (NoSuchMethodException nsme) {
+				ctor = rpcClass.getDeclaredConstructor();
+				withTSDBArg = false;
+			}
+			return withTSDBArg ? ctor.newInstance(tsdb) : ctor.newInstance();
+		}
+	}
+	
+		
 	
 	/**
 	 * Recursive directory scanner to find class file

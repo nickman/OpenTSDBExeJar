@@ -55,4 +55,11 @@ public @interface RPC {
 	 */
 	String[] telnetKeys() default {};
 	
+	/**
+	 * Indicates if this RPC class is a singleton.
+	 * If it is, it should support a static <b><code>getInstance()</code></b> method.
+	 * @return true if this RPC class is a singleton, false otherwise.
+	 */
+	boolean singleton() default false;
+	
 }

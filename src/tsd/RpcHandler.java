@@ -13,15 +13,14 @@
 package net.opentsdb.tsd;
 
 import java.io.IOException;
-import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import net.opentsdb.BuildData;
 import net.opentsdb.core.Aggregators;
@@ -647,34 +646,135 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 	 * Installs the Addin RPCs
 	 */
 	protected void installAddinRPCs() {
-		final TSDRPCAddinFinder finder = new TSDRPCAddinFinder(tsdb.getConfig());
+		final TSDRPCAddinFinder finder = new TSDRPCAddinFinder(tsdb);
+		final Set<String> skipped = new HashSet<String>();
 		if(finder.scan()) {
 			int installed = 0;
 			for(Map.Entry<String, HttpRpc> entry: finder.getLocatedHttpRpcs().entrySet()) {
+				final String noInstallKey = "rpcskip.http." + entry.getValue().getClass().getName();
+				if(System.getProperties().containsKey(noInstallKey)) {
+					if(skipped.add(noInstallKey)) {
+						LOG.info("Skipping Install of @RPC annotated HttpRpc instance [{}] because the system property [{}] was set", entry.getValue().getClass().getName(), noInstallKey);
+					}
+					continue;
+				}
+				final String rpcKey = decodeKey(entry.getKey(), tsdb.getConfig());
+				if(rpcKey==null || rpcKey.trim().isEmpty()) {
+					LOG.warn("Ignoring blank or null rpc key for HttpRpc class [{}]", entry.getValue().getClass().getName());
+					continue;
+				}				
 				if(http_commands.containsKey(entry.getKey())) {
-					LOG.warn("Skipping Addin HttpRpc [{}] because it's key [{}] is already registered", entry.getValue().getClass().getName(), entry.getKey());
+					LOG.warn("Skipping Addin HttpRpc [{}] because it's key [{}] is already registered", entry.getValue().getClass().getName(), rpcKey);
 				} else {
-					http_commands.put(entry.getKey(), entry.getValue());
+					http_commands.put(rpcKey, entry.getValue());
 					installed++;
-					LOG.info("Installed Addin HttpRpc [{}] under key [{}]", entry.getValue().getClass().getName(), entry.getKey());
+					LOG.info("Installed Addin HttpRpc [{}] under key [{}]", entry.getValue().getClass().getName(), rpcKey);
 				}
 			}
-			LOG.info("Installed {} Addin HttpRpcs", installed);
+			LOG.info("Installed {} Addin HttpRpcs", installed);		
+			if(!skipped.isEmpty()) {
+				LOG.info("Skipped {} Addin HttpRpcs", skipped.size());
+				skipped.clear();
+			}
+			
 			installed = 0;
 			for(Map.Entry<String, TelnetRpc> entry: finder.getLocatedTelnetRpcs().entrySet()) {
+				final String noInstallKey = "rpcskip.telnet." + entry.getValue().getClass().getName();
+				if(System.getProperties().containsKey(noInstallKey)) {
+					if(skipped.add(noInstallKey)) {
+						LOG.info("Skipping Install of @RPC annotated TelnetRpc instance [{}] because the system property [{}] was set", entry.getValue().getClass().getName(), noInstallKey);
+					}
+					continue;
+				}				
+				final String rpcKey = decodeKey(entry.getKey(), tsdb.getConfig());
+				if(rpcKey==null || rpcKey.trim().isEmpty()) {
+					LOG.warn("Ignoring blank or null rpc key for TelnetRpc class [{}]", entry.getValue().getClass().getName());
+					continue;
+				}
 				if(telnet_commands.containsKey(entry.getKey())) {
-					LOG.warn("Skipping Addin TelnetRpc [{}] because it's key [{}] is already registered", entry.getValue().getClass().getName(), entry.getKey());
+					LOG.warn("Skipping Addin TelnetRpc [{}] because it's key [{}] is already registered", entry.getValue().getClass().getName(), rpcKey);
 				} else {
-					telnet_commands.put(entry.getKey(), entry.getValue());
+					telnet_commands.put(rpcKey, entry.getValue());
 					installed++;
-					LOG.info("Installed Addin TelnetRpc [{}] under key [{}]", entry.getValue().getClass().getName(), entry.getKey());
+					LOG.info("Installed Addin TelnetRpc [{}] under key [{}]", entry.getValue().getClass().getName(), rpcKey);
 				}
 			}
 			LOG.info("Installed {} Addin TelnetRpcs", installed);
+			if(!skipped.isEmpty()) {
+				LOG.info("Skipped {} Addin TelnetRpcs", skipped.size());
+			}
 		}
 	}
 	
 	
+	
+	/** Key token pattern for System Property token substitution */
+	public static final Pattern SYSPROP_PATTERN = Pattern.compile("\\$s\\{(.*?)(?::(.*?))?\\}");
+	/** Key token pattern for Environment Variable token substitution */
+	public static final Pattern ENV_PATTERN = Pattern.compile("\\$e\\{(.*?)(?::(.*?))?\\}");
+	/** Key token pattern for TSDB Config token substitution */
+	public static final Pattern CONFIG_PATTERN = Pattern.compile("\\$c\\{(.*?)(?::(.*?))?\\}");
+	
+	/** The JVM system properties as a string map */
+	public static final Map<String, String> SYSPROPS_AS_MAP = new HashMap<String, String>(System.getProperties().size());
+	
+	/**
+	 * Returns the system prop string map, populating it if it was not already
+	 * @return the system prop string map
+	 */
+	private static Map<String, String> getSysPropsMap() {
+		if(SYSPROPS_AS_MAP.isEmpty()) {
+			synchronized(SYSPROPS_AS_MAP) {
+				if(SYSPROPS_AS_MAP.isEmpty()) {
+					for(Map.Entry<Object, Object> entry: System.getProperties().entrySet()) {
+						SYSPROPS_AS_MAP.put(entry.getKey().toString(), entry.getValue().toString());
+					}					
+				}
+			}
+		}
+		return SYSPROPS_AS_MAP;
+	}
+	
+	
+	/**
+	 * Accepts an @RPC key string and replaces any recognized tokens
+	 * @param original The original annotation supplied key
+	 * @param cfg The TSDB configuration
+	 * @return the decoded key
+	 */
+	protected String decodeKey(final String original, final Config cfg) {
+		String base = original;
+		base = replace(base, SYSPROP_PATTERN, getSysPropsMap());
+		base = replace(base, ENV_PATTERN, System.getenv());
+		base = replace(base, CONFIG_PATTERN, cfg.getMap());
+		return base;
+	}
+	
+	/**
+	 * Executes the token replacement for a given pattern
+	 * @param base The base string to execute the replacement on
+	 * @param pattern The pattern to execute the replacement with
+	 * @param lookup The lookup map to read values from
+	 * @return the replaced string
+	 */
+	protected String replace(final CharSequence base, final Pattern pattern, final Map<String, String> lookup) {
+		final StringBuffer b = new StringBuffer();
+		Matcher m = pattern.matcher(base);
+		while(m.find()) {
+			String defValue = m.group(2);
+			if(defValue==null) defValue = "";
+			
+			String decoded = lookup.get(m.group(1));
+			if(decoded==null) decoded = defValue.trim();
+			
+			m.appendReplacement(b, decoded);    
+		}
+		m.appendTail(b);
+		return b.toString();
+	}
+	
+	
+
 	
 	//================================================================================================
 
