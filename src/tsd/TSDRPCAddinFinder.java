@@ -390,17 +390,16 @@ public class TSDRPCAddinFinder {
 				throw new Exception("RPC Class " + rpcClass.getName() + " is annotated as a singleton but getInstance method was not static");
 			}
 			return withTSDBArg ? m.invoke(null, tsdb) : m.invoke(null); 					
-		} else {
-			Constructor<?> ctor = null;
-			try {
-				ctor = rpcClass.getDeclaredConstructor(TSDB.class);
-				withTSDBArg = true;
-			} catch (NoSuchMethodException nsme) {
-				ctor = rpcClass.getDeclaredConstructor();
-				withTSDBArg = false;
-			}
-			return withTSDBArg ? ctor.newInstance(tsdb) : ctor.newInstance();
 		}
+		Constructor<?> ctor = null;
+		try {
+			ctor = rpcClass.getDeclaredConstructor(TSDB.class);
+			withTSDBArg = true;
+		} catch (NoSuchMethodException nsme) {
+			ctor = rpcClass.getDeclaredConstructor();
+			withTSDBArg = false;
+		}
+		return withTSDBArg ? ctor.newInstance(tsdb) : ctor.newInstance();
 	}
 	
 		
