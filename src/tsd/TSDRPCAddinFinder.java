@@ -24,28 +24,17 @@
  */
 package net.opentsdb.tsd;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
-import java.lang.management.ManagementFactory;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.util.Collections;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.jar.JarEntry;
-import java.util.jar.JarInputStream;
 
-import javassist.ClassPath;
-import javassist.ClassPool;
-import javassist.CtClass;
-import javassist.LoaderClassPath;
 import net.opentsdb.core.TSDB;
+import net.opentsdb.utils.AnnotationFinder;
 import net.opentsdb.utils.Config;
 
 import org.slf4j.Logger;
@@ -60,95 +49,71 @@ import org.slf4j.LoggerFactory;
  */
 
 public class TSDRPCAddinFinder {
+	/** The singleton instance */
+	private static volatile TSDRPCAddinFinder instance = null;
+	/** The singleton instance ctor lock */
+	private static final Object lock = new Object();
+	
 	/** The config key for the Addin RPCs classpath */
 	public static final String ADDIN_CP = "tsd.addin.rpcs.classpath";
 	/** The config key for the Addin RPCs package name restrictions */
 	public static final String ADDIN_PACKAGES = "tsd.addin.rpcs.packages";
+	
 	/** Empty String const */
 	private static final String[] EMPTY_ARR = {};
 	/** Static class logger */
 	private static final Logger LOG = LoggerFactory.getLogger(TSDRPCAddinFinder.class);
-	
-	
-	/** The configured addin classpaths */
-	protected final String[] addinClasspaths;
-	/** The configured addin package name restrictions */
-	protected final String[] addinPackages;
-	
-	/** The located annotated HttpRpc impls */
-	protected final Map<String, HttpRpc> httpImpls = new HashMap<String, HttpRpc>(); 
-	/** The located annotated TelnetRpc impls */
-	protected final Map<String, TelnetRpc> telnetImpls = new HashMap<String, TelnetRpc>(); 
 	/** The TSDB instance */
 	protected final TSDB tsdb;
+	/** The annotation finder */
+	protected final AnnotationFinder annotationFinder = new AnnotationFinder(true);
 	
+	/** A map of loaded HttpRpcs keyed by the invocation keys */
+	protected final Map<String, HttpRpc> httpImpls = new HashMap<String, HttpRpc>();
+	/** A map of loaded TelnetRpcs keyed by the invocation keys */
+	protected final Map<String, TelnetRpc> telnetImpls = new HashMap<String, TelnetRpc>();
+	
+	/**
+	 * Acquires the TSDRPCAddinFinder singleton instance
+	 * @param tsdb The TSDB 
+	 * @return the TSDRPCAddinFinder singleton instance
+	 */
+	public static TSDRPCAddinFinder getInstance(final TSDB tsdb) {
+		if(tsdb==null) throw new IllegalArgumentException("The passed TSDB instance was null");
+		if(instance==null) {
+			synchronized(lock) {
+				if(instance==null) {
+					instance = new TSDRPCAddinFinder(tsdb);
+				}
+			}
+		}
+		return instance;
+	}
 	
 	
 	/**
 	 * Creates a new TSDRPCAddinFinder
 	 * @param tsdb The TSDB instance
 	 */
-	public TSDRPCAddinFinder(final TSDB tsdb) {
+	private TSDRPCAddinFinder(final TSDB tsdb) {
 		this.tsdb = tsdb;
-		// configure the classpaths to scan 
-		addinClasspaths = preClean(tsdb.getConfig(), ADDIN_CP, gatherClasspaths());
-		// configure the allowed packages 
-		addinPackages = preClean(tsdb.getConfig(), ADDIN_PACKAGES);
+		// configure the classpaths to scan
+		annotationFinder.appendPaths(preClean(tsdb.getConfig(), ADDIN_CP))
+			.appendAllowedPackages(preClean(tsdb.getConfig(), ADDIN_PACKAGES))
+			.addAttributeDecoderMap("c", tsdb.getConfig().getMap());
 	}
 	
-	@SuppressWarnings("resource")
-	private String[] gatherClasspaths() {
-		final Set<File> fpaths = new LinkedHashSet<File>();
-		final Set<String> paths = new LinkedHashSet<String>();
-		for(String s: ManagementFactory.getRuntimeMXBean().getClassPath().split(File.pathSeparator)) {
-			File f = new File(s);
-			if(f.exists()) {
-				fpaths.add(f.getAbsoluteFile());
-			}
-			paths.add(s);
-		}
-		//Collections.addAll(paths, ManagementFactory.getRuntimeMXBean().getClassPath().split(File.pathSeparator));
-		// Get the system class loader URLs, since the TSDB forces classpath changes by adding URLS
-		// directly to the URLClassLoader, so they don't show up in the RuntimeMXBean
-		URLClassLoader ucl = (URLClassLoader)ClassLoader.getSystemClassLoader();
-		URL[] urls = ucl.getURLs();
-		// Create an array of strings from the loaded URLs		
-		for(int i = 0; i < urls.length; i++) {
-			final URL url = urls[i];
-			if("file".equals(url.getProtocol())) {
-				File f = new File(url.getFile());
-				if(f.exists()) {
-					f = f.getAbsoluteFile();
-					if(fpaths.add(f)) {
-						paths.add(urls[i].toString());
-					}
-				}
-			} else {
-				paths.add(urls[i].toString());
-			}
-		}		
-		return paths.toArray(new String[paths.size()]);
-	}
 	
 	/**
 	 * Executes the classpath scan
-	 * @return true if any @RPCs were found, false otherwise
+	 * @return true if any @RPCs were found and indexed, false otherwise
 	 */
 	public boolean scan() {
 		final long start = System.currentTimeMillis();
-		for(String s: addinClasspaths) {		
-			LOG.debug("Inspecting classpath: {}", s);
-			File f = new File(s.trim());
-			if(f.exists()) {
-				if(f.isDirectory()) {
-					scan(f.getAbsoluteFile());
-				}
-			} else {
-				try {
-					URL url = new URL(s.trim());
-					scan(url);
-				} catch (Exception x) {/* No Op */}
-			}
+		final Collection<Class<?>> locatedRPCClasses = annotationFinder.scan(RPC.class);
+		LOG.info("Located [{}] candidate classes annotated with @RPC", locatedRPCClasses);
+		for(Class<?> clazz: locatedRPCClasses) {
+			processRPCClass(clazz);
 		}
 		final long elapsed = System.currentTimeMillis() - start;
 		LOG.info("Completed @RPC Scan in {} ms. Located:\n\tHttpRpcs: {}\n\tTelnetRpcs: {}", elapsed, httpImpls.size(), telnetImpls.size());
@@ -181,9 +146,8 @@ public class TSDRPCAddinFinder {
 	 * @param additional Optional additional values to add
 	 * @return A cleaned string array
 	 */
-	private static String[] preClean(final Config config, final String property, String...additional) {
-		String[] args = config.hasProperty(property) ? config.getString(property).split(",") : null;
-//		if(args==null || args.length==0) return EMPTY_ARR;
+	private static String[] preClean(final Config config, final String property) {
+		String[] args = config.hasProperty(property) ? config.getString(property).split(",") : EMPTY_ARR;
 		Set<String> set = new LinkedHashSet<String>();
 		if(args!=null) {
 			for(int i = 0; i < args.length; i++) {
@@ -191,26 +155,9 @@ public class TSDRPCAddinFinder {
 				set.add(args[i].trim());
 			}
 		}
-		for(int i = 0; i < additional.length; i++) {
-			if(additional[i] == null || additional[i].trim().isEmpty()) continue;
-			set.add(additional[i].trim());
-		}
-		
 		return set.toArray(new String[set.size()]);
 	}
 	
-	/**
-	 * Determines if the passed package name is in an allowed package
-	 * @param packageName The package name to test
-	 * @return true if allowed, false otherwise
-	 */
-	protected boolean isAllowedPackage(final String packageName) {
-		if(addinPackages.length==0) return true;		
-		for(int i = 0; i < addinPackages.length; i++) {
-			if(packageName.indexOf(addinPackages[i])!=-1) return true;
-		}
-		return false;
-	}
 	
 
 	/**
@@ -218,10 +165,10 @@ public class TSDRPCAddinFinder {
 	 * @param clazz The located class
 	 */
 	protected void processRPCClass(final Class<?> clazz) {
-		final RPC rpc = clazz.getAnnotation(RPC.class);
+		final RPC rpc = annotationFinder.getAnnotation(clazz, RPC.class); 				
 		if(rpc==null) return;
 		try {
-			final Object rpcInstance = buildRPCInstance(clazz, tsdb, rpc);
+			final Object rpcInstance = buildRPCInstance(clazz, rpc);
 			String[] names = rpc.httpKeys();
 			if(names.length>0 && rpcInstance instanceof HttpRpc) {		
 				try {
@@ -261,120 +208,16 @@ public class TSDRPCAddinFinder {
 		}
 	}
 	
-	/**
-	 * Scans a file system directory for @RPC annotated classes
-	 * @param dir The directory to scan
-	 */
-	protected void scan(final File dir) {
-		LOG.debug("Scanning Dir {}", dir);
-		final ClassPool cp = new ClassPool(true);		
-		try {
-			final ClassLoader CL = new URLClassLoader(new URL[]{dir.toURI().toURL()});
-			final ClassPath path = new LoaderClassPath(CL); 
-			cp.appendClassPath(path);
-			final Set<File> classFiles = findClassFiles(dir, null);
-			for(final File f: classFiles) {
-				FileInputStream fis = null;
-				try {
-					fis = new FileInputStream(f);
-					CtClass ctClazz = cp.makeClass(fis);
-					for(Object ann: ctClazz.getAvailableAnnotations()) {
-						if(RPC.class.isInstance(ann)) {
-							if(isAllowedPackage(ctClazz.getPackageName())) {
-								Class<?> instance = null;
-								try {
-									instance = Class.forName(ctClazz.getName(), true, CL);
-								} catch (Exception ex) {/* No Op */}
-								if(instance!=null) {
-									processRPCClass(instance);
-									break;
-								}
-								try {
-									instance = ctClazz.toClass();
-									LOG.debug("@RPC Match: {}", instance.getName()); 
-									processRPCClass(instance);									
-								} catch (Throwable t) {
-									LOG.error("Failed to load class [{}] from path [{}]. Error: {}", ctClazz.getName(), dir, t.toString());
-								}
-								break;
-							}
-						}
-					}
-				} finally {
-					if(fis!=null) try { fis.close(); } catch (Exception x) {/* No Op */}
-				}
-			}
-		} catch (Exception ex) {
-			throw new RuntimeException(ex);
-		}		
-	}
 	
-	/**
-	 * Scans a Jar URL for @RPC annotated classes
-	 * @param url The URL to scan
-	 */
-	protected void scan(final URL url) {
-		if("file".equals(url.getProtocol())) {
-			File d = new File(url.getFile());
-			if(d.exists() && d.isDirectory()) {
-				scan(d);
-				return;
-			}
-		}
-		final ClassLoader CL = new URLClassLoader(new URL[]{url});
-		final ClassPath path = new LoaderClassPath(CL); 
-		final ClassPool cp = new ClassPool(true);
-		cp.appendClassPath(path);
-		InputStream is = null;
-		JarInputStream jarInputStream = null;
-		try {
-			is = url.openStream();
-			jarInputStream = new JarInputStream(is);
-			JarEntry je = null;
-			while((je = jarInputStream.getNextJarEntry())!=null) {
-				if(je.isDirectory() || !je.getName().endsWith(".class")) continue;
-				CtClass ctClazz = cp.makeClass(jarInputStream);
-				for(Object ann: ctClazz.getAvailableAnnotations()) {
-					if(RPC.class.isInstance(ann)) {
-						if(isAllowedPackage(ctClazz.getPackageName())) {
-							Class<?> instance = null;
-							try {
-								instance = Class.forName(ctClazz.getName(), true, CL);
-							} catch (Exception ex) {/* No Op */}
-							if(instance!=null) {
-								processRPCClass(instance);
-								break;
-							}
-							
-							try {
-								instance = ctClazz.toClass();
-								LOG.debug("@RPC Match: {}", instance.getName());
-								processRPCClass(instance);
-							} catch (Throwable t) {
-								LOG.error("Failed to load class [{}] from path [{}]. Error: {}", ctClazz.getName(), url, t.toString());
-							}
-							break;
-						}						
-					}
-				}
-			}
-		} catch (Exception ex) {
-			throw new RuntimeException(ex);
-		} finally {
-			if(jarInputStream!=null) try { jarInputStream.close(); } catch (Exception x) {/* No Op */}
-			if(is!=null) try { is.close(); } catch (Exception x) {/* No Op */}
-		}
-	}
 	
 	/**
 	 * Builds the RPC Class instance
 	 * @param rpcClass The RPC class
-	 * @param tsdb The TSDB instance
 	 * @param rpc The RPC annotation
 	 * @return the RPC instance
 	 * @throws Exception thrown on any error 
 	 */
-	protected Object buildRPCInstance(final Class<?> rpcClass, final TSDB tsdb, final RPC rpc) throws Exception {
+	protected Object buildRPCInstance(final Class<?> rpcClass, final RPC rpc) throws Exception {
 		boolean withTSDBArg = true;
 		if(rpc.singleton()) {
 			Method m = null;			 
@@ -401,28 +244,5 @@ public class TSDRPCAddinFinder {
 		}
 		return withTSDBArg ? ctor.newInstance(tsdb) : ctor.newInstance();
 	}
-	
-		
-	
-	/**
-	 * Recursive directory scanner to find class file
-	 * @param dir The directory to scan
-	 * @param accum The accumulated file set
-	 * @return The located class files
-	 */
-	protected static Set<File> findClassFiles(final File dir, Set<File> accum) {
-		if(accum==null) accum = new LinkedHashSet<File>();
-		for(File f: dir.listFiles()) {
-			if(f.isDirectory()) {
-				findClassFiles(f, accum);
-			} else {
-				if(f.getName().endsWith(".class")) {
-					accum.add(f.getAbsoluteFile());
-				}
-			}
-		}
-		return accum;
-	}
-	
 
 }

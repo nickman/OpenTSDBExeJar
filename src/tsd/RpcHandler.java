@@ -19,14 +19,11 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import net.opentsdb.BuildData;
 import net.opentsdb.core.Aggregators;
 import net.opentsdb.core.TSDB;
 import net.opentsdb.stats.StatsCollector;
-import net.opentsdb.utils.Config;
 import net.opentsdb.utils.JSON;
 
 import org.jboss.netty.channel.Channel;
@@ -36,6 +33,7 @@ import org.jboss.netty.channel.SimpleChannelUpstreamHandler;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpRequest;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
+import org.jboss.netty.handler.codec.http.websocketx.WebSocketFrame;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,12 +68,6 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
   /** The TSDB to use. */
   private final TSDB tsdb;
   
-	/** The config key for the TSD RPC addin classes */
-	public static final String TSD_RPC_ADDIN_KEY = "tsd.addins.rpcs";
-	/** The config key for the TSD RPC addin classpath */
-	public static final String TSD_RPC_ADDIN_CP_KEY = "tsd.addins.rpcs.classpath";
-	/** The template for the classloader MBean's ObjectName */
-	public static final String CLASSLOADER_OBJECTNAME = "net.opentsdb.classpath:type=ClassLoader,name=%s.classpath";
 	
 
   /**
@@ -190,6 +182,8 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
         handleTelnetRpc(msgevent.getChannel(), (String[]) message);
       } else if (message instanceof HttpRequest) {
         handleHttpQuery(tsdb, msgevent.getChannel(), (HttpRequest) message);
+      } else if (message instanceof WebSocketFrame) {
+    	  ctx.sendUpstream(msgevent);
       } else {
         logError(msgevent.getChannel(), "Unexpected message type "
                  + message.getClass() + ": " + message);
@@ -646,7 +640,7 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 	 * Installs the Addin RPCs
 	 */
 	protected void installAddinRPCs() {
-		final TSDRPCAddinFinder finder = new TSDRPCAddinFinder(tsdb);
+		final TSDRPCAddinFinder finder = TSDRPCAddinFinder.getInstance(tsdb);
 		final Set<String> skipped = new HashSet<String>();
 		if(finder.scan()) {
 			int installed = 0;
@@ -658,7 +652,7 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 					}
 					continue;
 				}
-				final String rpcKey = decodeKey(entry.getKey(), tsdb.getConfig());
+				final String rpcKey = entry.getKey().toLowerCase();
 				if(rpcKey==null || rpcKey.trim().isEmpty()) {
 					LOG.warn("Ignoring blank or null rpc key for HttpRpc class [{}]", entry.getValue().getClass().getName());
 					continue;
@@ -686,7 +680,7 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 					}
 					continue;
 				}				
-				final String rpcKey = decodeKey(entry.getKey(), tsdb.getConfig());
+				final String rpcKey = entry.getKey().toLowerCase();
 				if(rpcKey==null || rpcKey.trim().isEmpty()) {
 					LOG.warn("Ignoring blank or null rpc key for TelnetRpc class [{}]", entry.getValue().getClass().getName());
 					continue;
@@ -706,75 +700,6 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
 		}
 	}
 	
-	
-	
-	/** Key token pattern for System Property token substitution */
-	public static final Pattern SYSPROP_PATTERN = Pattern.compile("\\$s\\{(.*?)(?::(.*?))?\\}");
-	/** Key token pattern for Environment Variable token substitution */
-	public static final Pattern ENV_PATTERN = Pattern.compile("\\$e\\{(.*?)(?::(.*?))?\\}");
-	/** Key token pattern for TSDB Config token substitution */
-	public static final Pattern CONFIG_PATTERN = Pattern.compile("\\$c\\{(.*?)(?::(.*?))?\\}");
-	
-	/** The JVM system properties as a string map */
-	public static final Map<String, String> SYSPROPS_AS_MAP = new HashMap<String, String>(System.getProperties().size());
-	
-	/**
-	 * Returns the system prop string map, populating it if it was not already
-	 * @return the system prop string map
-	 */
-	private static Map<String, String> getSysPropsMap() {
-		if(SYSPROPS_AS_MAP.isEmpty()) {
-			synchronized(SYSPROPS_AS_MAP) {
-				if(SYSPROPS_AS_MAP.isEmpty()) {
-					for(Map.Entry<Object, Object> entry: System.getProperties().entrySet()) {
-						SYSPROPS_AS_MAP.put(entry.getKey().toString(), entry.getValue().toString());
-					}					
-				}
-			}
-		}
-		return SYSPROPS_AS_MAP;
-	}
-	
-	
-	/**
-	 * Accepts an @RPC key string and replaces any recognized tokens
-	 * @param original The original annotation supplied key
-	 * @param cfg The TSDB configuration
-	 * @return the decoded key
-	 */
-	protected String decodeKey(final String original, final Config cfg) {
-		String base = original;
-		base = replace(base, SYSPROP_PATTERN, getSysPropsMap());
-		base = replace(base, ENV_PATTERN, System.getenv());
-		base = replace(base, CONFIG_PATTERN, cfg.getMap());
-		return base;
-	}
-	
-	/**
-	 * Executes the token replacement for a given pattern
-	 * @param base The base string to execute the replacement on
-	 * @param pattern The pattern to execute the replacement with
-	 * @param lookup The lookup map to read values from
-	 * @return the replaced string
-	 */
-	protected String replace(final CharSequence base, final Pattern pattern, final Map<String, String> lookup) {
-		final StringBuffer b = new StringBuffer();
-		Matcher m = pattern.matcher(base);
-		while(m.find()) {
-			String defValue = m.group(2);
-			if(defValue==null) defValue = "";
-			
-			String decoded = lookup.get(m.group(1));
-			if(decoded==null) decoded = defValue.trim();
-			
-			m.appendReplacement(b, decoded);    
-		}
-		m.appendTail(b);
-		return b.toString();
-	}
-	
-	
-
 	
 	//================================================================================================
 

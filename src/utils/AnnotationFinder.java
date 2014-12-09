@@ -19,19 +19,24 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.annotation.Annotation;
 import java.lang.management.ManagementFactory;
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Array;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
 import java.util.regex.Matcher;
@@ -41,25 +46,9 @@ import javassist.ClassPath;
 import javassist.ClassPool;
 import javassist.CtClass;
 import javassist.LoaderClassPath;
-import javassist.bytecode.annotation.AnnotationMemberValue;
-import javassist.bytecode.annotation.ArrayMemberValue;
-import javassist.bytecode.annotation.BooleanMemberValue;
-import javassist.bytecode.annotation.ByteMemberValue;
-import javassist.bytecode.annotation.CharMemberValue;
-import javassist.bytecode.annotation.ClassMemberValue;
-import javassist.bytecode.annotation.DoubleMemberValue;
-import javassist.bytecode.annotation.EnumMemberValue;
-import javassist.bytecode.annotation.FloatMemberValue;
-import javassist.bytecode.annotation.IntegerMemberValue;
-import javassist.bytecode.annotation.LongMemberValue;
-import javassist.bytecode.annotation.MemberValue;
-import javassist.bytecode.annotation.MemberValueVisitor;
-import javassist.bytecode.annotation.ShortMemberValue;
-import javassist.bytecode.annotation.StringMemberValue;
 import javassist.util.proxy.MethodHandler;
 import javassist.util.proxy.ProxyFactory;
 import javassist.util.proxy.ProxyObject;
-import net.opentsdb.tsd.RPC;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,6 +73,9 @@ public class AnnotationFinder {
 	protected final Set<String> allowedPackages = new HashSet<String>();
 	/** The JVM system properties as a string map */
 	protected final Map<String, String> SYSPROPS_AS_MAP = new HashMap<String, String>(System.getProperties().size());
+	
+	/** Annotation Cache */
+	protected static final Map<String, WeakReference<? extends Annotation>> annotationCache = new ConcurrentHashMap<String, WeakReference<? extends Annotation>>();
 	
 	/** The JAR file extension */
 	public static final String JAR_EXT = ".jar";
@@ -144,9 +136,6 @@ public class AnnotationFinder {
 		return this;
 	}
 	
-	public static void log(Object msg) {
-		System.out.println(msg);
-	}
 	
 	/**
 	 * Executes the scan and returns all the located classes
@@ -188,6 +177,11 @@ public class AnnotationFinder {
 		return foundClasses.values();
 	}
 	
+	/**
+	 * Executes a full class load on the specified javassist CtClass
+	 * @param clazz The javassist CtClass
+	 * @return the loaded class
+	 */
 	protected Class<?> loadClass(final CtClass clazz) {
 		try {
 			return Class.forName(clazz.getName());
@@ -237,8 +231,10 @@ public class AnnotationFinder {
 	 */
 	protected Map<String, CtClass> scanDir(final File dir, final Class<? extends Annotation> annotationType) {
 		final Map<String, CtClass> classMap = new HashMap<String, CtClass>();
+		final Set<String> ignores = new HashSet<String>(128);
 		ClassPath path = null; 
 		try {
+			@SuppressWarnings("resource")
 			final ClassLoader CL = new URLClassLoader(new URL[]{dir.toURI().toURL()});
 			path = new LoaderClassPath(CL); 
 			classPool.appendClassPath(path);
@@ -250,7 +246,7 @@ public class AnnotationFinder {
 					CtClass ctClazz = classPool.makeClass(fis);
 					for(Object ann: ctClazz.getAvailableAnnotations()) {
 						if(annotationType.isInstance(ann)) {
-							if(isAllowedPackage(ctClazz.getPackageName())) {
+							if(isAllowedPackage(ctClazz.getPackageName(), ignores)) { 
 								if(!classMap.containsKey(ctClazz.getName())) {
 									classMap.put(ctClazz.getName(), ctClazz);
 								}															
@@ -268,96 +264,151 @@ public class AnnotationFinder {
 		return classMap;
 	}
 	
-	public <T> T getAnnotation(final Class<?> clazz, final Class<T> annotationType) {
-		final T t = (T) clazz.getAnnotation((Class<? extends Annotation>)annotationType);
-		ProxyFactory pf = new ProxyFactory();
-		pf.setInterfaces(new Class[]{((Annotation)t).annotationType()});
-		MethodHandler mi = new MethodHandler() {
-		     public Object invoke(Object self, Method m, Method proceed, Object[] args) throws Throwable {
-		    	 return null;
-		     }
-		};
-		try {
-			Object obj = pf.createClass().newInstance();
-			((ProxyObject)obj).setHandler(mi);
-			return (T)obj;
-		} catch (Exception ex) {
-			throw new RuntimeException(ex);
+	/**
+	 * Retrieves an Annotation proxy of the specified type for the passed class, 
+	 * with all scalar and array String attribute values token substituted
+	 * @param clazz The class to get the annotation from
+	 * @param annotationType The type of annotation to get
+	 * @return the annotation proxy
+	 */
+	@SuppressWarnings("unchecked")
+	public <T extends Annotation> T getAnnotation(final Class<?> clazz, final Class<T> annotationType) {
+		final String cacheKey = new StringBuilder(clazz.getClassLoader()==null ? "SYS" : clazz.getClassLoader().toString())
+		.append("@")
+		.append(clazz.getName())
+		.append("@")
+		.append(annotationType.getName())
+		.toString();		
+		WeakReference<T> weakRef = (WeakReference<T>) annotationCache.get(cacheKey);
+		if(weakRef==null || weakRef.get()==null) {
+			synchronized(annotationCache) {
+				weakRef = (WeakReference<T>) annotationCache.get(cacheKey);
+				if(weakRef==null || weakRef.get()==null) {
+					LOG.debug("Building Annotation Proxy [{}@{}]", annotationType.getSimpleName(), clazz.getSimpleName());
+					final T t = (T) clazz.getAnnotation((Class<? extends Annotation>)annotationType);
+					ProxyFactory pf = new ProxyFactory();
+					pf.setInterfaces(new Class[]{((Annotation)t).annotationType()});
+					final MethodHandler mi = new MethodHandler() {
+						protected final Map<Method, Object> objectCache = new ConcurrentHashMap<Method, Object>();
+
+						public Object invoke(Object self, Method m, Method proceed, Object[] args) throws Throwable {
+							try {
+								Object value = objectCache.get(m);
+								if(value==null) {
+									synchronized(objectCache) {
+										value = objectCache.get(m);
+										if(value==null) {
+											LOG.debug("Fetching Annotation Proxy Attribute Value for [{}@{}.({})]", annotationType.getSimpleName(), clazz.getSimpleName(), m.getName());
+											value = m.invoke(t);
+											final Class<?> mtype = m.getReturnType();
+											if(mtype.isArray()) {
+												final Class<?> ctype = getBaseType(mtype);
+												if(String.class.equals(ctype)) {
+													final List<String[]> oneDimArrs = reduce(value, null);
+													for(String[] arr: oneDimArrs) {
+														for(int i = 0; i < arr.length; i++) {
+															arr[i] = tokenReplace(arr[i]);
+														}
+													}									    			 		    			 
+												}
+											}
+											objectCache.put(m, value);
+										}
+									}
+								}
+								return value;
+							} catch (Throwable t2) {
+								LOG.error("Proxy Invocation Error on [{}]", m.toGenericString(), t2);
+								throw t2;
+							}
+						}
+						protected int getDimension(final Class<?> type) {
+							int dim = 0;
+							Class<?> ctype = type;
+							while(ctype.isArray()) {
+								dim++;
+								ctype = ctype.getComponentType();
+							}
+							return dim;
+
+						}
+						protected Class<?> getBaseType(final Class<?> type) {
+							Class<?> ctype = type;
+							while(ctype.isArray()) {
+								ctype = ctype.getComponentType();
+							}
+							return ctype;
+						}
+						protected List<String[]> reduce(final Object arr, final List<String[]> acc) {
+							final List<String[]> accumulator = acc==null ? new ArrayList<String[]>() : acc;
+							if(!arr.getClass().isArray()) return accumulator;
+							final int dim = getDimension(arr.getClass());
+							if(dim==1) {
+								accumulator.add((String[]) arr);
+							} else {
+								for(int i = 0; i < dim; i++) {
+									reduce(Array.get(arr, i), accumulator);
+								}		
+							}
+							return accumulator;
+						}
+
+					};
+					try {
+						Object obj = pf.createClass().newInstance();
+						((ProxyObject)obj).setHandler(mi);
+						weakRef = new WeakReference<T>((T)obj);
+						annotationCache.put(cacheKey, weakRef);
+					} catch (Exception ex) {
+						throw new RuntimeException(ex);
+					}
+
+				}
+			}
 		}
+		return weakRef.get();
 	}
+	
+	/**
+	 * Performs token substitution of the passed string
+	 * @param strValue The string to process
+	 * @return the token substituted string
+	 */
+	public String tokenReplace(final String strValue) {
+		if(strValue==null || strValue.trim().isEmpty()) return strValue;
+		String value = strValue.trim();
+		final Matcher m = TOKEN_PATTERN.matcher(value);
+		while(m.find()) {
+			final String decoded = lookupToken(m.group(1), m.group(2), m.group(3));
+			value = value.replace(m.toMatchResult().group() + ":", decoded);
+			value = value.replace(m.toMatchResult().group(), decoded);
+			
+		}
+		LOG.debug("Token Subst: [{}] --> [{}]", strValue, value);
+		return value;
+	}
+	
+	/**
+	 * Attempts to decode this token 
+	 * @param type The type of the token
+	 * @param key The token key
+	 * @param defaultValue The default
+	 * @return the decoded value or the default
+	 */
+	public String lookupToken(final String type, final String key, final String defaultValue) {
+		final String def = defaultValue==null ? "" : defaultValue;
+		if(type==null || type.trim().isEmpty()) return def;
+		if(key==null || key.trim().isEmpty()) return def;
+		final Map<String, String> dmap = attributeDecoders.get(type.trim());
+		if(dmap==null) return def;
+		final String val = dmap.get(key.trim());
+		return val==null ? def : val.trim();
+	}
+	
 	
 	/** Token pattern for token substitution: g1: token type, g2: the key, g3: the default */
 	public static final Pattern TOKEN_PATTERN = Pattern.compile("\\$(.*?)\\{(.*?)(?::(.*?))?\\}");
 	
-	
-	private final MemberValueVisitor memberDecoder = new EmptyMemberValueVisitor() {
-		/**
-		 * {@inheritDoc}
-		 * @see net.opentsdb.utils.AnnotationFinder.EmptyMemberValueVisitor#visitArrayMemberValue(javassist.bytecode.annotation.ArrayMemberValue)
-		 */
-		@Override
-		public void visitArrayMemberValue(final ArrayMemberValue node) {
-			if(node!=null && node.getValue()!=null) {
-				for(final MemberValue mv: node.getValue()) {
-					if(mv!=null) mv.accept(this);
-				}
-			}
-		}
-		
-		/**
-		 * {@inheritDoc}
-		 * @see net.opentsdb.utils.AnnotationFinder.EmptyMemberValueVisitor#visitStringMemberValue(javassist.bytecode.annotation.StringMemberValue)
-		 */
-		@Override
-		public void visitStringMemberValue(final StringMemberValue node) {
-			if(node!=null && node.getValue()!=null) {
-				String value = node.getValue();
-				if(value!=null) {
-//					final StringBuffer b = new StringBuffer();
-					final Matcher m = TOKEN_PATTERN.matcher(value);
-					while(m.find()) {
-						final String decoded = lookupToken(m.group(1), m.group(2), m.group(3));
-						value = value.replace(m.toMatchResult().group(), decoded);
-						
-					}
-//					m.appendTail(b);
-					node.setValue(value);
-				}
-			}
-		}
-		
-//		public T getAnnotation(final Class<?> clazz, final Class<T extends Annotation> annotationType) {
-//			Annotation tAnn = clazz.getAnnotation(annotationType);
-//			return Proxy.newProxyInstance(clazz.getClassLoader(), new Class[]{tAnn.annotationType()}, new InvocationHandler() {
-//				/**
-//				 * {@inheritDoc}
-//				 * @see java.lang.reflect.InvocationHandler#invoke(java.lang.Object, java.lang.reflect.Method, java.lang.Object[])
-//				 */
-//				@Override
-//				public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-//					// TODO Auto-generated method stub
-//					return null;
-//				}
-//			});
-//		}
-		
-		/**
-		 * Attempts to decode this token 
-		 * @param type The type of the token
-		 * @param key The token key
-		 * @param defaultValue The default
-		 * @return the decoded value or the default
-		 */
-		public String lookupToken(final String type, final String key, final String defaultValue) {
-			final String def = defaultValue==null ? "" : defaultValue;
-			if(type==null || type.trim().isEmpty()) return def;
-			if(key==null || key.trim().isEmpty()) return def;
-			final Map<String, String> dmap = attributeDecoders.get(type.trim());
-			if(dmap==null) return def;
-			final String val = dmap.get(key.trim());
-			return val==null ? def : val.trim();
-		}
-	};
 	
 	
 	
@@ -411,18 +462,38 @@ public class AnnotationFinder {
 	 */
 	protected Map<String, CtClass> scan(final int bufferSize, final InputStream is, final Class<? extends Annotation> annotationType) throws IOException {
 		final Map<String, CtClass> classMap = new HashMap<String, CtClass>();
+		final Set<String> ignores = new HashSet<String>(128);
 		BufferedInputStream bis = null;
 		JarInputStream jis = null;
 		try {
 			bis = new BufferedInputStream(is, bufferSize);
 			jis = new JarInputStream(bis);
 			JarEntry je = null;
+			String packageName = null;
 			while((je = jis.getNextJarEntry())!=null) {
-				if(je.isDirectory() || !je.getName().endsWith(".class")) continue;
+				if(je.isDirectory()) {
+					packageName = je.getName().replace('/', '.');
+					while((je = jis.getNextJarEntry())!=null) {
+						if(je.isDirectory()) {
+							packageName = je.getName().replace('/', '.');
+							if(!isAllowedPackage(packageName, ignores)) {
+								continue;
+							}
+						}
+					}
+					//LOG.info("Directory: [{}]", je.getName());
+					continue;
+				}
+								
+				if(!isAllowedPackage(packageName, ignores)) {
+					continue;
+				}
+				if(!je.getName().endsWith(".class")) continue;
+				if(packageName!=null) LOG.info("Scanning Archive Directory: [{}]", packageName);
 				CtClass ctClazz = classPool.makeClass(jis);
 				for(Object ann: ctClazz.getAvailableAnnotations()) {
 					if(annotationType.isInstance(ann)) {
-						if(isAllowedPackage(ctClazz.getPackageName())) {
+						if(isAllowedPackage(ctClazz.getPackageName(), ignores)) { 
 							if(!classMap.containsKey(ctClazz.getName())) {
 								classMap.put(ctClazz.getName(), ctClazz);
 							}							
@@ -540,13 +611,16 @@ public class AnnotationFinder {
 	/**
 	 * Determines if the passed package name is in an allowed package
 	 * @param packageName The package name to test
+	 * @param ignores An optional set of known package ignores
 	 * @return true if allowed, false otherwise
 	 */
-	protected boolean isAllowedPackage(final String packageName) {
-		if(allowedPackages.isEmpty()) return true;
+	protected boolean isAllowedPackage(final String packageName, final Set<String> ignores) {
+		if(packageName==null || packageName.trim().isEmpty() || allowedPackages.isEmpty()) return true;
+		if(ignores!=null && ignores.contains(packageName)) return false;
 		for(String pname: allowedPackages) {
 			if(packageName.indexOf(pname)!=-1) return true;
 		}
+		if(ignores!=null) ignores.add(packageName);
 		return false;
 	}
 	
@@ -659,17 +733,22 @@ public class AnnotationFinder {
 	 */
 	public static void main(String[] args) {
 		System.out.println(new AnnotationFinder(true).printPath());
-		log("Testing AnnotationFinder");
 		AnnotationFinder af = new AnnotationFinder(true);
-		Collection<Class<?>> classes = af.scan(RPC.class);
-		log("Loaded Classes:" + classes.size());
-		for(Class<?> klazz: classes) {
-			RPC rpc = klazz.getAnnotation(RPC.class);
-			log(String.format("Class: [%s], httpKeys: %s", klazz.getName(), Arrays.toString(rpc.httpKeys())));
+		af.appendAllowedPackages("net.opentsdb.utils");
+		LOG.info("Testing AnnotationFinder");
+		
+		Collection<Class<?>> classes = af.scan(net.opentsdb.tsd.RPC.class);
+		LOG.info("Loaded Classes:" + classes.size());
+		for(int i = 0; i < 10; i++) {
+			for(Class<?> klazz: classes) {
+				net.opentsdb.tsd.RPC rpc = af.getAnnotation(klazz, net.opentsdb.tsd.RPC.class);
+						//klazz.getAnnotation(RPC.class);
+				LOG.info(String.format("Class: [%s], httpKeys: %s", klazz.getName(), Arrays.toString(rpc.httpKeys())));
+			}
 		}
 	}
 
-	@RPC(httpKeys={"$s{java.io.tmpdir}", "$e{COMPUTERNAME}"})
+	@net.opentsdb.tsd.RPC(httpKeys={"$s{java.io.tmpdir}", "$e{USER}"})
 	private static class Foo {
 		
 	}
@@ -731,127 +810,4 @@ public class AnnotationFinder {
 		}
 		return SYSPROPS_AS_MAP;
 	}
-	
-	
-	private class EmptyMemberValueVisitor implements MemberValueVisitor {
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitAnnotationMemberValue(javassist.bytecode.annotation.AnnotationMemberValue)
-		 */
-		@Override
-		public void visitAnnotationMemberValue(AnnotationMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitArrayMemberValue(javassist.bytecode.annotation.ArrayMemberValue)
-		 */
-		@Override
-		public void visitArrayMemberValue(ArrayMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitBooleanMemberValue(javassist.bytecode.annotation.BooleanMemberValue)
-		 */
-		@Override
-		public void visitBooleanMemberValue(BooleanMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitByteMemberValue(javassist.bytecode.annotation.ByteMemberValue)
-		 */
-		@Override
-		public void visitByteMemberValue(ByteMemberValue node) {
-			/* No Op */			
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitCharMemberValue(javassist.bytecode.annotation.CharMemberValue)
-		 */
-		@Override
-		public void visitCharMemberValue(CharMemberValue node) {
-			/* No Op */			
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitDoubleMemberValue(javassist.bytecode.annotation.DoubleMemberValue)
-		 */
-		@Override
-		public void visitDoubleMemberValue(DoubleMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitEnumMemberValue(javassist.bytecode.annotation.EnumMemberValue)
-		 */
-		@Override
-		public void visitEnumMemberValue(EnumMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitFloatMemberValue(javassist.bytecode.annotation.FloatMemberValue)
-		 */
-		@Override
-		public void visitFloatMemberValue(FloatMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitIntegerMemberValue(javassist.bytecode.annotation.IntegerMemberValue)
-		 */
-		@Override
-		public void visitIntegerMemberValue(IntegerMemberValue node) {
-			/* No Op */			
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitLongMemberValue(javassist.bytecode.annotation.LongMemberValue)
-		 */
-		@Override
-		public void visitLongMemberValue(LongMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitShortMemberValue(javassist.bytecode.annotation.ShortMemberValue)
-		 */
-		@Override
-		public void visitShortMemberValue(ShortMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitStringMemberValue(javassist.bytecode.annotation.StringMemberValue)
-		 */
-		@Override
-		public void visitStringMemberValue(StringMemberValue node) {
-			/* No Op */
-		}
-
-		/**
-		 * {@inheritDoc}
-		 * @see javassist.bytecode.annotation.MemberValueVisitor#visitClassMemberValue(javassist.bytecode.annotation.ClassMemberValue)
-		 */
-		@Override
-		public void visitClassMemberValue(ClassMemberValue node) {
-			/* No Op */
-		}
-		
-	}
-
 }
