@@ -316,7 +316,7 @@ public class ConfigArgP {
 		Matcher m = JS_PATTERN.matcher(text);
 		StringBuffer ret = new StringBuffer();
 		while(m.find()) {
-			String source = "importPackage(java.lang); " +  m.group(1);
+			String source = "load(\"nashorn:mozilla_compat.js\");\nimportPackage(java.lang); " +  m.group(1);
 			try {
 				
 				Object obj = scriptEngine.eval(source);

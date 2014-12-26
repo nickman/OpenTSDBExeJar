@@ -75,7 +75,7 @@
  {
   "key": "tsd.network.worker_threads",
   "cl-option": "--worker-threads",
-  "defaultValue": "$[(Integer)(cores * 2)]",
+  "defaultValue": "$[new Integer(cores * 2)]",
   "description": "Number of worker threads dedicated to Netty, defaults to # of CPUs * 2",
   "help": "default",
   "meta": "POSINT"
@@ -399,8 +399,8 @@
    
 ],
 "bindings" : [ 
-	"importPackage(Packages.java.lang);",
-	"var cores = Runtime.getRuntime().availableProcessors();",
-	"var maxheap = Runtime.getRuntime().maxMemory();"
+	"//importPackage(Packages.java.lang);",
+	"var cores = java.lang.Runtime.getRuntime().availableProcessors();",
+	"var maxheap = java.lang.Runtime.getRuntime().maxMemory();"
 ]	
 }
