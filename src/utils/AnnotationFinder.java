@@ -299,6 +299,7 @@ public class AnnotationFinder {
 										value = objectCache.get(m);
 										if(value==null) {
 											LOG.debug("Fetching Annotation Proxy Attribute Value for [{}@{}.({})]", annotationType.getSimpleName(), clazz.getSimpleName(), m.getName());
+											if(!m.isAccessible()) m.setAccessible(true);
 											value = m.invoke(t);
 											final Class<?> mtype = m.getReturnType();
 											if(mtype.isArray()) {
