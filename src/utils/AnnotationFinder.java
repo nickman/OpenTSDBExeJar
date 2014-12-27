@@ -293,6 +293,7 @@ public class AnnotationFinder {
 
 						public Object invoke(Object self, Method m, Method proceed, Object[] args) throws Throwable {
 							try {
+								if(!m.isAccessible()) m.setAccessible(true);
 								Object value = objectCache.get(m);
 								if(value==null) {
 									synchronized(objectCache) {

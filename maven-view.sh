@@ -75,6 +75,8 @@ function domavenview() {
 	echo "Linking client gwt.xml"
 	linkdir "$TSDB_SRC/tsd/QueryUi.gwt.xml" "$TSDB_MVN/src/main/java/tsd/QueryUi.gwt.xml"
 
+	echo "Linking static/favicon.ico"
+	linkdir "$TSDB_SRC/tsd/static" "$TSDB_MVN/src/main/resources/queryui"
 
 
 	echo "Linking test source to directory tree matching package structure"

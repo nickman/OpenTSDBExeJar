@@ -228,6 +228,7 @@ public class TSDRPCAddinFinder {
 				m = rpcClass.getDeclaredMethod("getInstance");
 				withTSDBArg = false;
 			}
+			m.setAccessible(true);
 			if(!Modifier.isStatic(rpcClass.getModifiers())) {
 				LOG.error("RPC Class [{}] is annotated as a singleton but getInstance method was not static", rpcClass.getName());
 				throw new Exception("RPC Class " + rpcClass.getName() + " is annotated as a singleton but getInstance method was not static");
@@ -242,6 +243,7 @@ public class TSDRPCAddinFinder {
 			ctor = rpcClass.getDeclaredConstructor();
 			withTSDBArg = false;
 		}
+		ctor.setAccessible(true);
 		return withTSDBArg ? ctor.newInstance(tsdb) : ctor.newInstance();
 	}
 
