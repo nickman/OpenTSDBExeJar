@@ -315,8 +315,13 @@ public class ConfigArgP {
 		if(text==null) return null;
 		Matcher m = JS_PATTERN.matcher(text);
 		StringBuffer ret = new StringBuffer();
+		final boolean isNashorn = scriptEngine.getFactory().getEngineName().toLowerCase().contains("nashorn");
 		while(m.find()) {
-			String source = "load(\"nashorn:mozilla_compat.js\");\nimportPackage(java.lang); " +  m.group(1);
+			String source = "";
+			if(isNashorn) {
+				source = "load(\"nashorn:mozilla_compat.js\");\n";
+			}
+			source += "importPackage(java.lang); " +  m.group(1);
 			try {
 				
 				Object obj = scriptEngine.eval(source);
