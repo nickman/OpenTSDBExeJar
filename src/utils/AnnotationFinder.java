@@ -314,7 +314,9 @@ public class AnnotationFinder {
 													}									    			 		    			 
 												}
 											}
-											objectCache.put(m, value);
+											if(value != null) {
+												objectCache.put(m, value);
+											}
 										}
 									}
 								}
